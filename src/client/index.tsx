@@ -126,10 +126,17 @@ const WIDGET_CSS = `
   border-radius: 4px;
 }
 .swd-node:hover { background: rgba(154, 208, 255, 0.12); }
-.swd-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
-.swd-dot-running { background: #4ade80; }
-.swd-dot-idle { background: #6b7280; }
-.swd-dot-root { background: #60a5fa; box-shadow: 0 0 5px rgba(96, 165, 250, 0.8); }
+.swd-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
+/* 状态色（实心 = 主 agent，空心 = 子代理） */
+.swd-st-running { background: #4ade80; border-color: #4ade80; }
+.swd-st-idle { background: #6b7280; border-color: #6b7280; }
+.swd-st-stall { background: #f87171; border-color: #f87171; }
+/* 主 agent：实心圆（状态色填充） */
+.swd-dot-root { border: 1.5px solid; box-shadow: 0 0 5px rgba(255, 255, 255, 0.25); }
+/* 子代理：空心圆（边框 = 状态色） */
+.swd-dot-ring { background: transparent; border: 1.5px solid; }
+.swd-toggle { cursor: pointer; color: #9aa0a6; font-size: 9px; flex: none; width: 10px; text-align: center; }
+.swd-toggle:hover { color: #fff; }
 .swd-tag {
   color: #0f172a;
   background: #60a5fa;
@@ -184,6 +191,9 @@ const WIDGET_CSS = `
 }
 .swd-action:hover { color: #e6e6e6; background: rgba(255, 255, 255, 0.06); border-radius: 6px; }
 `
+
+/** 根筛选窗口：最近活跃（working 或刚结束）的顶层会话才显示，更老的隐藏。 */
+const ROOT_ACTIVE_WINDOW_MS = 30 * 60_000
 
 /** 人类可读的时长。 */
 function formatDuration(ms: number): string {
@@ -252,7 +262,7 @@ function renderNode(
   node: TreeNode,
   threshold: number,
   onOpen: (id: string) => void,
-  opts: { isRoot?: boolean; isCurrent?: boolean; idx?: number } = {},
+  opts: { isRoot?: boolean; isCurrent?: boolean; idx?: number; collapsed?: boolean; onToggle?: () => void } = {},
 ): HTMLLIElement {
   const { row } = node
   const li = document.createElement('li')
@@ -265,16 +275,32 @@ function renderNode(
     e.stopPropagation()
     onOpen(row.id)
   })
+  const { text, stalled } = statusText(row, threshold)
+  const stClass = stalled ? 'swd-st-stall' : row.status === 'running' ? 'swd-st-running' : 'swd-st-idle'
   const dot = document.createElement('span')
-  dot.className = opts.isRoot === true
-    ? 'swd-dot swd-dot-root'
-    : `swd-dot ${row.status === 'running' ? 'swd-dot-running' : 'swd-dot-idle'}`
+  dot.className = `swd-dot ${stClass} ${opts.isRoot === true ? 'swd-dot-root' : 'swd-dot-ring'}`
   const idEl = document.createElement('span')
   idEl.className = opts.isRoot === true ? 'swd-id swd-id-root' : 'swd-id'
-  idEl.textContent = opts.isRoot === true || row.label === undefined
-    ? row.id.slice(0, 8)
-    : `子代理${opts.idx ?? '?'}-${row.label.slice(0, 24)}`
+  // 根节点优先显示会话标题（无标题兜底 id 前 8 位）；子代理优先创建名 label，
+  // 无 label 时兜底标题，再兜底 id。
+  idEl.textContent = opts.isRoot === true
+    ? (row.title ?? row.id.slice(0, 8))
+    : (row.label !== undefined
+        ? `子代理${opts.idx ?? '?'}-${row.label.slice(0, 24)}`
+        : (row.title ?? row.id.slice(0, 8)))
   idEl.title = row.id
+  // 根节点折叠开关（idle 根默认折叠为单行）
+  if (opts.isRoot === true) {
+    const toggle = document.createElement('span')
+    toggle.className = 'swd-toggle'
+    toggle.textContent = opts.collapsed === true ? '▸' : '▾'
+    toggle.title = opts.collapsed === true ? '展开子树' : '折叠子树'
+    toggle.addEventListener('click', (e) => {
+      e.stopPropagation()
+      opts.onToggle?.()
+    })
+    line.appendChild(toggle)
+  }
   line.appendChild(dot)
   if (opts.isCurrent === true) {
     const tag = document.createElement('span')
@@ -283,7 +309,6 @@ function renderNode(
     line.appendChild(tag)
   }
   line.appendChild(idEl)
-  const { text, stalled } = statusText(row, threshold)
   const meta = document.createElement('span')
   meta.className = stalled ? 'swd-stall' : 'swd-meta'
   meta.textContent = text
@@ -296,7 +321,7 @@ function renderNode(
     excerptEl.textContent = row.lastReply
     li.appendChild(excerptEl)
   }
-  if (node.children.length > 0) {
+  if (node.children.length > 0 && opts.collapsed !== true) {
     const ul = document.createElement('ul')
     for (const [i, child] of node.children.entries()) {
       ul.appendChild(renderNode(child, threshold, onOpen, { idx: i + 1 }))
@@ -338,6 +363,13 @@ class WatchdogWidget {
   private dragStartRight = 0
   private summonEl: HTMLButtonElement | null = null
   private visibilityCleanup: (() => void) | null = null
+  /** 最近一次快照（会话切换时即时重渲染用）。 */
+  private lastSnapshot: WatchdogSnapshot | null = null
+  /** 用户手动折叠的根（idle 根默认折叠，除非在 expandedRoots）。 */
+  private readonly collapsedRoots = new Set<string>()
+  /** 用户手动展开的根（覆盖 idle 默认折叠）。 */
+  private readonly expandedRoots = new Set<string>()
+  private unsubscribeList: (() => void) | null = null
 
   constructor(ctx: ClientContext) {
     this.ctx = ctx
@@ -392,6 +424,11 @@ class WatchdogWidget {
     this.root.appendChild(this.titleBarEl)
     this.root.appendChild(this.bodyEl)
 
+    // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期。
+    this.unsubscribeList = this.ctx.sessions.list.subscribe(() => {
+      if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
+    })
+
     document.addEventListener(TOGGLE_EVENT, () => {
       if (this.state.visible) this.hide()
       else this.show()
@@ -415,6 +452,8 @@ class WatchdogWidget {
   dispose(): void {
     this.stop()
     this.root.remove()
+    this.unsubscribeList?.()
+    this.unsubscribeList = null
     if (this.summonEl !== null) {
       this.summonEl.remove()
       this.summonEl = null
@@ -524,7 +563,10 @@ class WatchdogWidget {
     this.fetching = true
     void fetch('/api/subagent-watchdog/agents')
       .then(res => { if (!res.ok) throw new Error(String(res.status)); return res.json() as Promise<WatchdogSnapshot> })
-      .then(snapshot => this.render(snapshot))
+      .then(snapshot => {
+        this.lastSnapshot = snapshot
+        this.render(snapshot)
+      })
       .catch(() => {
         this.offlineEl.style.display = 'block'
         this.treeEl.replaceChildren()
@@ -536,7 +578,15 @@ class WatchdogWidget {
   private render(snapshot: WatchdogSnapshot): void {
     this.offlineEl.style.display = 'none'
     const currentId = this.ctx.sessions.list.getSnapshot().current
-    const forest = buildForest(snapshot.roots, snapshot.rows)
+    const now = snapshot.now
+    // 根筛选：当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
+    // 其余历史会话不显示（避免整屏都是 idle 树）。
+    const keptRoots = snapshot.roots.filter(root => (
+      root.id === currentId
+      || now - root.lastActivity < ROOT_ACTIVE_WINDOW_MS
+      || snapshot.rows.some(row => row.parentSession === root.id)
+    ))
+    const forest = buildForest(keptRoots, snapshot.rows)
     this.treeEl.replaceChildren()
     if (forest.length === 0) {
       const empty = document.createElement('div')
@@ -550,9 +600,24 @@ class WatchdogWidget {
     const runningCount = countRunning(forest)
     this.titleTextEl.textContent = total === 0 ? 'Agent 看板' : `Agent ${runningCount}/${total}`
     for (const root of forest) {
+      // idle 根默认折叠为单行（除非用户展开过）；running 根默认展开。
+      const defaultCollapsed = root.row.status === 'idle'
+      const collapsed = this.collapsedRoots.has(root.row.id)
+        || (defaultCollapsed && !this.expandedRoots.has(root.row.id))
       this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id), {
         isRoot: true,
         isCurrent: root.row.id === currentId,
+        collapsed,
+        onToggle: () => {
+          if (collapsed) {
+            this.collapsedRoots.delete(root.row.id)
+            this.expandedRoots.add(root.row.id)
+          } else {
+            this.collapsedRoots.add(root.row.id)
+            this.expandedRoots.delete(root.row.id)
+          }
+          if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
+        },
       }))
     }
   }

@@ -72,6 +72,8 @@ export interface AgentSnapshotRow {
   readonly action?: AgentAction
   /** 创建时的名字（descriptor label，懒解析；无则缺省）。 */
   readonly label?: string
+  /** 会话显示标题（`session/title` 事件最新值；无则缺省，浏览器兜底 id）。 */
+  readonly title?: string
 }
 
 /** 一次快照的完整载荷。 */
@@ -104,6 +106,7 @@ interface SessionEventLike {
     }
     readonly name?: string
     readonly arguments?: string
+    readonly title?: string
   }
 }
 
@@ -220,6 +223,8 @@ export function apply(ctx: Context, config: Config): void {
   const lastReply = new Map<string, string>()
   /** 会话 id → 当前动作（正在执行的工具 / 正在输出）。 */
   const lastAction = new Map<string, AgentAction>()
+  /** 会话 id → 显示标题（`session/title` 事件增量缓存）。 */
+  const titleCache = new Map<string, string>()
   /** 子代理 id → 创建时的名字（descriptor label，懒查询缓存）。 */
   const labelCache = new Map<string, string>()
   /** 正在查询 label 的子代理 id（去重）。 */
@@ -247,6 +252,7 @@ export function apply(ctx: Context, config: Config): void {
     lastRemind.delete(id)
     lastReply.delete(id)
     lastAction.delete(id)
+    titleCache.delete(id)
     labelCache.delete(id)
     labelPending.delete(id)
   }
@@ -258,6 +264,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('session/event', (session, event) => {
     lastActivity.set(session.id, event.time)
     switch (event.type) {
+      case 'session/title': {
+        const title = event.data?.title
+        if (typeof title === 'string' && title !== '') titleCache.set(session.id, title)
+        break
+      }
       case 'assistant/message': {
         const text = extractReplyText(event.data?.message?.content)
         if (text.length > 0) lastReply.set(session.id, text)
@@ -290,6 +301,18 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('agent/disposed', ({ agent }) => {
     if (agent.session.header.origin === 'subagent') forget(agent.id)
   })
+
+  // 启动预热：为已存在的会话回填标题（插件装配前产生的 session/title 事件）。
+  for (const agent of ctx.agents.list()) {
+    const events = agent.session.events
+    for (let i = events.length - 1; i >= 0; i--) {
+      const title = events[i].data?.title
+      if (events[i].type === 'session/title' && typeof title === 'string' && title !== '') {
+        titleCache.set(agent.id, title)
+        break
+      }
+    }
+  }
 
   /** 向停滞子代理的父会话注入一条 notice（静默排队，不唤醒模型）。 */
   const remind = (agent: AgentLike, silentForMs: number): void => {
@@ -362,6 +385,7 @@ export function apply(ctx: Context, config: Config): void {
         ...(lastReply.has(agent.id) ? { lastReply: excerpt(lastReply.get(agent.id)!) } : {}),
         ...(lastAction.has(agent.id) ? { action: lastAction.get(agent.id) } : {}),
         ...(label !== undefined ? { label } : {}),
+        ...(titleCache.has(agent.id) ? { title: titleCache.get(agent.id) } : {}),
       }
       if (header.origin === 'subagent') {
         if (label === undefined) ensureLabel(agent.id, header.parentSession)
