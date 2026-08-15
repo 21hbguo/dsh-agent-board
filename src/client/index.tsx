@@ -200,8 +200,9 @@ const WIDGET_CSS = `
 /** 根筛选窗口：最近活跃（working 或刚结束）的顶层会话才显示，更老的隐藏。 */
 const ROOT_ACTIVE_WINDOW_MS = 30 * 60_000
 
-/** 空闲保留期：用户点进去看过（visited）的完成项转为空闲，超过此期限自动消失。 */
-const IDLE_RETENTION_MS = 30 * 60_000
+/** 完成态保留期：子代理完成后短暂显示（方便瞄一眼结果），超时自动消失，
+ *  避免旧完成节点堆积。默认 5 秒；太短可调大。 */
+const FINISHED_SHOW_MS = 5_000
 
 /** 人类可读的时长。 */
 function formatDuration(ms: number): string {
@@ -420,8 +421,6 @@ class AgentBoardWidget {
   private readonly collapsedRoots = new Set<string>()
   /** 用户手动展开的根（覆盖 idle 默认折叠）。 */
   private readonly expandedRoots = new Set<string>()
-  /** 用户点进去看过（visited）的会话：完成项点开后转空闲，超时消失。 */
-  private readonly visitedSessions = new Set<string>()
   private unsubscribeList: (() => void) | null = null
   /** SSE 订阅：数据变化信号 → 立即拉快照（轮询保留为兜底）。 */
   private sseSource: EventSource | null = null
@@ -479,11 +478,8 @@ class AgentBoardWidget {
     this.root.appendChild(this.titleBarEl)
     this.root.appendChild(this.bodyEl)
 
-    // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期；
-    // 当前会话视为「已点开看过」——完成的子代理从此进入空闲计时。
+    // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期。
     this.unsubscribeList = this.ctx.sessions.list.subscribe(() => {
-      const current = this.ctx.sessions.list.getSnapshot().current
-      if (current !== undefined) this.visitedSessions.add(current)
       if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
     })
 
@@ -641,13 +637,10 @@ class AgentBoardWidget {
   private render(snapshot: AgentBoardSnapshot): void {
     this.offlineEl.style.display = 'none'
     const currentId = this.ctx.sessions.list.getSnapshot().current
-    if (currentId !== undefined) this.visitedSessions.add(currentId)
     const now = snapshot.now
-    // 完成项：点进去看过 → 转空闲；空闲超过保留期 → 从看板消失。
+    // 完成项：完成后短暂显示（方便瞄一眼结果），超过保留期自动消失，不堆积。
     const keptRows = snapshot.rows.filter(row => !(
-      row.status === 'finished'
-      && this.visitedSessions.has(row.id)
-      && now - row.lastActivity > IDLE_RETENTION_MS
+      row.status === 'finished' && now - row.lastActivity > FINISHED_SHOW_MS
     ))
     // 根筛选：当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
     // 其余历史会话不显示（避免整屏都是 idle 树）。
@@ -692,9 +685,8 @@ class AgentBoardWidget {
     }
   }
 
-  /** 点击节点跳转会话，并标记为已点开（完成项 → 空闲计时）。 */
+  /** 点击节点跳转会话。 */
   private openSession(id: string, parentId?: string): void {
-    this.visitedSessions.add(id)
     void openSession(this.ctx, id, parentId)
   }
 }
