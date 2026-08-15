@@ -145,6 +145,15 @@ const WIDGET_CSS = `
 .swd-stall { color: #f87171; font-weight: 700; margin-left: auto; padding-left: 8px; }
 .swd-offline { color: #fbbf24; text-align: center; padding: 4px 0; }
 .swd-empty { color: #9aa0a6; text-align: center; padding: 4px 0; }
+.swd-excerpt {
+  color: #8b93a1;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0 0 2px 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .swd-summon {
   position: fixed;
   right: 16px;
@@ -274,7 +283,9 @@ function renderNode(node: TreeNode, threshold: number, onOpen: (id: string) => v
   const li = document.createElement('li')
   const line = document.createElement('div')
   line.className = 'swd-node'
-  line.title = `点击打开会话 ${row.id}`
+  line.title = row.lastReply !== undefined
+    ? `点击打开会话 ${row.id}\n最新答复：${row.lastReply}`
+    : `点击打开会话 ${row.id}`
   line.addEventListener('click', (e) => {
     e.stopPropagation()
     onOpen(row.id)
@@ -301,6 +312,12 @@ function renderNode(node: TreeNode, threshold: number, onOpen: (id: string) => v
   }
   line.appendChild(meta)
   li.appendChild(line)
+  if (row.lastReply !== undefined) {
+    const excerptEl = document.createElement('div')
+    excerptEl.className = 'swd-excerpt'
+    excerptEl.textContent = row.lastReply
+    li.appendChild(excerptEl)
+  }
   if (node.children.length > 0) {
     const ul = document.createElement('ul')
     for (const child of node.children) ul.appendChild(renderNode(child, threshold, onOpen))

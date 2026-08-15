@@ -61,6 +61,8 @@ export interface AgentSnapshotRow {
   readonly lastActivity: number
   /** 距最后活动的毫秒数。 */
   readonly silentMs: number
+  /** 该子代理最新一条 assistant 答复的文本节选（无则缺省）。 */
+  readonly lastReply?: string
 }
 
 /** 一次快照的完整载荷。 */
@@ -84,6 +86,12 @@ interface SessionEventLike {
   readonly type: string
   readonly seq: number
   readonly time: number
+  /** assistant/message 事件的载荷（只取需要的面）。 */
+  readonly data?: {
+    readonly message?: {
+      readonly content?: readonly { readonly type?: string; readonly text?: string }[]
+    }
+  }
 }
 
 /** Session 最小结构面。 */
@@ -142,6 +150,26 @@ function formatSilent(ms: number): string {
   return `${Math.floor(totalMin / 60)} 小时 ${totalMin % 60} 分钟`
 }
 
+/** 从 assistant 消息的 content 块里提取纯文本（拼接、去空白）。 */
+function extractReplyText(content: readonly { readonly type?: string; readonly text?: string }[] | undefined): string {
+  if (content === undefined) return ''
+  return content
+    .filter(block => block.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text as string)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** 节选上限（字符）。 */
+const REPLY_EXCERPT_MAX = 80
+
+/** 截断为一行节选。 */
+function excerpt(text: string): string {
+  if (text.length <= REPLY_EXCERPT_MAX) return text
+  return `${text.slice(0, REPLY_EXCERPT_MAX - 1)}…`
+}
+
 export function apply(ctx: Context, config: Config): void {
   const scanIntervalMs = envMs('DSH_WATCHDOG_SCAN_MS') ?? config.scanIntervalMs
   const stallThresholdMs = envMs('DSH_WATCHDOG_STALL_MS') ?? config.stallThresholdMs
@@ -151,10 +179,13 @@ export function apply(ctx: Context, config: Config): void {
   const lastActivity = new Map<string, number>()
   /** 子代理 id → 上次提醒时间，节流用。 */
   const lastRemind = new Map<string, number>()
+  /** 子代理 id → 最新一条 assistant 答复的节选文本。 */
+  const lastReply = new Map<string, string>()
 
   const forget = (id: string): void => {
     lastActivity.delete(id)
     lastRemind.delete(id)
+    lastReply.delete(id)
   }
 
   // 活动记账：子代理的每个 session 事件（turn/start、tool/start、
@@ -162,6 +193,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.on('session/event', (session, event) => {
     if (session.header.origin !== 'subagent') return
     lastActivity.set(session.id, event.time)
+    // 记录最新一条完成的 assistant 答复（流结束才发 assistant/message）。
+    if (event.type === 'assistant/message') {
+      const text = extractReplyText(event.data?.message?.content)
+      if (text.length > 0) lastReply.set(session.id, text)
+    }
   })
 
   // 结束/销毁即清账，避免对已完成的子代理继续提醒。
@@ -236,6 +272,7 @@ export function apply(ctx: Context, config: Config): void {
         parentSession: agent.session.header.parentSession,
         lastActivity: last,
         silentMs: now - last,
+        ...(lastReply.has(agent.id) ? { lastReply: excerpt(lastReply.get(agent.id)!) } : {}),
       })
     }
     rows.sort((a, b) => a.depth - b.depth || a.silentMs - b.silentMs)
