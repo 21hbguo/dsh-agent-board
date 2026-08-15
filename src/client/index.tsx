@@ -259,7 +259,8 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
   if (row.status === 'finished') return { text: '完成', stalled: false }
   if (row.status === 'running') {
     if (row.silentMs > threshold) return { text: `停滞 ${formatDuration(row.silentMs)}`, stalled: true }
-    return { text: '处理中…', stalled: false }
+    // 无动作且未停滞：同行已有答复节选表达进展，不再显示占位文本。
+    return { text: '', stalled: false }
   }
   return { text: '空闲', stalled: false }
 }
@@ -331,7 +332,7 @@ function renderNode(
   const meta = document.createElement('span')
   meta.className = stalled ? 'swd-stall' : 'swd-meta'
   meta.textContent = text
-  line.appendChild(meta)
+  if (text !== '') line.appendChild(meta)
   li.appendChild(line)
   if (node.children.length > 0 && opts.collapsed !== true) {
     const ul = document.createElement('ul')
