@@ -50,7 +50,12 @@ export const Config: Schema<Config> = Schema.object({
 
 // ---------------------------------------------------------------- 结构面
 
-/** 快照里一行子代理状态（浏览器面板渲染用）。 */
+/** 节点当前动作（“正在做什么”的实时信号）。 */
+export type AgentAction =
+  | { readonly kind: 'tool'; readonly text: string }
+  | { readonly kind: 'streaming' }
+
+/** 快照里一行 agent 状态（浏览器面板渲染用）。 */
 export interface AgentSnapshotRow {
   readonly id: string
   readonly status: 'idle' | 'running'
@@ -61,14 +66,18 @@ export interface AgentSnapshotRow {
   readonly lastActivity: number
   /** 距最后活动的毫秒数。 */
   readonly silentMs: number
-  /** 该子代理最新一条 assistant 答复的文本节选（无则缺省）。 */
+  /** 该 agent 最新一条 assistant 答复的文本节选（无则缺省）。 */
   readonly lastReply?: string
+  /** 当前动作：正在执行的工具 / 正在流式输出。 */
+  readonly action?: AgentAction
 }
 
 /** 一次快照的完整载荷。 */
 export interface WatchdogSnapshot {
   readonly now: number
   readonly stallThresholdMs: number
+  /** 顶层会话（主 agent 们），每个下面挂自己的子代理树。 */
+  readonly roots: readonly AgentSnapshotRow[]
   readonly rows: readonly AgentSnapshotRow[]
 }
 
@@ -86,11 +95,13 @@ interface SessionEventLike {
   readonly type: string
   readonly seq: number
   readonly time: number
-  /** assistant/message 事件的载荷（只取需要的面）。 */
+  /** 相关事件的载荷（只取需要的面）。 */
   readonly data?: {
     readonly message?: {
       readonly content?: readonly { readonly type?: string; readonly text?: string }[]
     }
+    readonly name?: string
+    readonly arguments?: string
   }
 }
 
@@ -165,38 +176,77 @@ function extractReplyText(content: readonly { readonly type?: string; readonly t
 const REPLY_EXCERPT_MAX = 80
 
 /** 截断为一行节选。 */
-function excerpt(text: string): string {
-  if (text.length <= REPLY_EXCERPT_MAX) return text
-  return `${text.slice(0, REPLY_EXCERPT_MAX - 1)}…`
+function excerpt(text: string, max = REPLY_EXCERPT_MAX): string {
+  if (text.length <= max) return text
+  return `${text.slice(0, max - 1)}…`
 }
+
+/** 从工具调用参数 JSON 里提取可读摘要（bash → command 字段，其他取首个字符串值）。 */
+function toolArgsSummary(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    if (typeof parsed.command === 'string' && parsed.command.trim() !== '') return parsed.command.trim()
+    for (const value of Object.values(parsed)) {
+      if (typeof value === 'string' && value.trim() !== '') return value.trim()
+    }
+  } catch { /* 非 JSON 参数按原文处理 */ }
+  return raw.replace(/\s+/g, ' ').trim().slice(0, 40)
+}
+
+/** 当前动作文本上限。 */
+const ACTION_MAX = 60
 
 export function apply(ctx: Context, config: Config): void {
   const scanIntervalMs = envMs('DSH_WATCHDOG_SCAN_MS') ?? config.scanIntervalMs
   const stallThresholdMs = envMs('DSH_WATCHDOG_STALL_MS') ?? config.stallThresholdMs
   const remindIntervalMs = envMs('DSH_WATCHDOG_REMIND_MS') ?? config.remindIntervalMs
 
-  /** 子代理 id → 最后一条 session 事件时间（Unix ms）。 */
+  /** 会话 id → 最后一条 session 事件时间（Unix ms）。 */
   const lastActivity = new Map<string, number>()
   /** 子代理 id → 上次提醒时间，节流用。 */
   const lastRemind = new Map<string, number>()
-  /** 子代理 id → 最新一条 assistant 答复的节选文本。 */
+  /** 会话 id → 最新一条 assistant 答复的节选文本。 */
   const lastReply = new Map<string, string>()
+  /** 会话 id → 当前动作（正在执行的工具 / 正在输出）。 */
+  const lastAction = new Map<string, AgentAction>()
 
   const forget = (id: string): void => {
     lastActivity.delete(id)
     lastRemind.delete(id)
     lastReply.delete(id)
+    lastAction.delete(id)
   }
 
-  // 活动记账：子代理的每个 session 事件（turn/start、tool/start、
-  // assistant/chunk、tool/result……）都刷新最后活动时间。
+  // 活动记账：所有会话的每个 session 事件（turn/start、tool/start、
+  // assistant/chunk、tool/result……）都刷新最后活动时间；子代理额外记录
+  // 答复节选与当前动作（工具执行中最后事件是 tool/call，流式输出中最后
+  // 事件是 assistant/chunk——天然可推断「正在做什么」）。
   ctx.on('session/event', (session, event) => {
-    if (session.header.origin !== 'subagent') return
     lastActivity.set(session.id, event.time)
-    // 记录最新一条完成的 assistant 答复（流结束才发 assistant/message）。
-    if (event.type === 'assistant/message') {
-      const text = extractReplyText(event.data?.message?.content)
-      if (text.length > 0) lastReply.set(session.id, text)
+    switch (event.type) {
+      case 'assistant/message': {
+        const text = extractReplyText(event.data?.message?.content)
+        if (text.length > 0) lastReply.set(session.id, text)
+        lastAction.delete(session.id)
+        break
+      }
+      case 'tool/call': {
+        const name = event.data?.name ?? 'tool'
+        const summary = toolArgsSummary(event.data?.arguments ?? '')
+        lastAction.set(session.id, {
+          kind: 'tool',
+          text: excerpt(`${name}: ${summary}`, ACTION_MAX),
+        })
+        break
+      }
+      case 'tool/result':
+        lastAction.delete(session.id)
+        break
+      case 'assistant/chunk':
+        lastAction.set(session.id, { kind: 'streaming' })
+        break
+      default:
+        break
     }
   })
 
@@ -255,28 +305,34 @@ export function apply(ctx: Context, config: Config): void {
     return () => clearInterval(timer)
   }, 'watchdog.scan')
 
-  // JSON 快照：浏览器半区的「子代理监控」面板轮询此端点。
+  // JSON 快照：浏览器半区的「Agent 看板」轮询此端点。顶层会话进 roots，
+  // 子代理进 rows（parentSession 关联成树）。
   const snapshot = (): WatchdogSnapshot => {
     const now = Date.now()
+    const roots: AgentSnapshotRow[] = []
     const rows: AgentSnapshotRow[] = []
     for (const agent of ctx.agents.list()) {
-      if (agent.session.header.origin !== 'subagent') continue
+      const header = agent.session.header
       const events = agent.session.events
       const last = lastActivity.get(agent.id)
         ?? events.at(-1)?.time
-        ?? agent.session.header.createdAt
-      rows.push({
+        ?? header.createdAt
+      const row: AgentSnapshotRow = {
         id: agent.id,
         status: agent.status,
-        depth: agent.session.header.delegationDepth ?? 0,
-        parentSession: agent.session.header.parentSession,
+        depth: header.delegationDepth ?? 0,
+        parentSession: header.parentSession,
         lastActivity: last,
         silentMs: now - last,
         ...(lastReply.has(agent.id) ? { lastReply: excerpt(lastReply.get(agent.id)!) } : {}),
-      })
+        ...(lastAction.has(agent.id) ? { action: lastAction.get(agent.id) } : {}),
+      }
+      if (header.origin === 'subagent') rows.push(row)
+      else roots.push(row)
     }
+    roots.sort((a, b) => b.lastActivity - a.lastActivity)
     rows.sort((a, b) => a.depth - b.depth || a.silentMs - b.silentMs)
-    return { now, stallThresholdMs, rows }
+    return { now, stallThresholdMs, roots, rows }
   }
 
   ctx.effect(() => {

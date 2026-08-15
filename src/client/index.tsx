@@ -199,22 +199,11 @@ interface TreeNode {
   children: TreeNode[]
 }
 
-/** 把平铺快照行组装成以 rootId（主 agent/当前会话）为根的层级树。 */
-function buildTree(rows: readonly AgentSnapshotRow[], rootId: string): TreeNode {
+/** 把快照组装成森林：每个顶层会话（roots）一棵树，子代理按血缘挂靠。 */
+function buildForest(roots: readonly AgentSnapshotRow[], rows: readonly AgentSnapshotRow[]): TreeNode[] {
   const byId = new Map<string, TreeNode>()
   for (const row of rows) byId.set(row.id, { row, children: [] })
-  // 主 agent 节点：不在快照里（快照只含子代理），合成一个根节点。
-  const root: TreeNode = {
-    row: {
-      id: rootId,
-      status: 'idle',
-      depth: 0,
-      parentSession: undefined,
-      lastActivity: Date.now(),
-      silentMs: 0,
-    },
-    children: [],
-  }
+  const forest = roots.map(row => ({ row, children: [] as TreeNode[] }))
   const attach = (parent: TreeNode): void => {
     for (const node of byId.values()) {
       if (node.row.parentSession === parent.row.id) {
@@ -223,63 +212,47 @@ function buildTree(rows: readonly AgentSnapshotRow[], rootId: string): TreeNode 
       }
     }
   }
-  attach(root)
+  for (const root of forest) attach(root)
   // 子节点按静默时长升序（活跃的在前）。
   const sortNodes = (nodes: TreeNode[]): void => {
     nodes.sort((a, b) => a.row.silentMs - b.row.silentMs)
     for (const n of nodes) sortNodes(n.children)
   }
-  sortNodes(root.children)
-  return root
+  for (const root of forest) sortNodes(root.children)
+  return forest
 }
 
-/** 子树节点总数（含根）。 */
-function countNodes(node: TreeNode): number {
-  return 1 + node.children.reduce((sum, child) => sum + countNodes(child), 0)
+/** 森林节点总数（含所有根）。 */
+function countNodes(forest: TreeNode[]): number {
+  return forest.reduce((sum, node) => sum + 1 + node.children.reduce((s, c) => s + countNodes([c]), 0), 0)
 }
 
-/** 子树中 running 的子代理数（根节点为合成 idle，天然不计入）。 */
-function countRunningChildren(node: TreeNode): number {
-  let n = node.row.status === 'running' ? 1 : 0
-  for (const child of node.children) n += countRunningChildren(child)
-  return n
+/** 森林中 running 的节点数。 */
+function countRunning(forest: TreeNode[]): number {
+  return forest.reduce((sum, node) => sum + (node.row.status === 'running' ? 1 : 0) + node.children.reduce((s, c) => s + countRunning([c]), 0), 0)
 }
 
-/** 渲染主 agent 根节点（当前会话），点击跳回主会话。 */
-function renderRoot(root: TreeNode, threshold: number, onOpen: (id: string) => void): HTMLLIElement {
-  const li = document.createElement('li')
-  const line = document.createElement('div')
-  line.className = 'swd-node'
-  line.title = `主 agent（当前会话）· 点击回到会话 ${root.row.id}`
-  line.addEventListener('click', (e) => {
-    e.stopPropagation()
-    onOpen(root.row.id)
-  })
-  const dot = document.createElement('span')
-  dot.className = 'swd-dot swd-dot-root'
-  const tag = document.createElement('span')
-  tag.className = 'swd-tag'
-  tag.textContent = '主'
-  const idEl = document.createElement('span')
-  idEl.className = 'swd-id swd-id-root'
-  idEl.textContent = root.row.id.slice(0, 8)
-  idEl.title = root.row.id
-  const count = countNodes(root) - 1
-  const meta = document.createElement('span')
-  meta.className = 'swd-meta'
-  meta.textContent = count > 0 ? `Agent × ${count}` : '无 Agent'
-  line.append(dot, tag, idEl, meta)
-  li.appendChild(line)
-  if (root.children.length > 0) {
-    const ul = document.createElement('ul')
-    for (const child of root.children) ul.appendChild(renderNode(child, threshold, onOpen))
-    li.appendChild(ul)
+/** 节点状态文本（动作优先：工具执行 / 流式输出 > 停滞 > 处理中 > 空闲）。 */
+function statusText(row: AgentSnapshotRow, threshold: number): { text: string; stalled: boolean } {
+  if (row.action !== undefined) {
+    return row.action.kind === 'tool'
+      ? { text: `⚙ ${row.action.text}`, stalled: false }
+      : { text: '✍ 输出中…', stalled: false }
   }
-  return li
+  if (row.status === 'running') {
+    if (row.silentMs > threshold) return { text: `停滞 ${formatDuration(row.silentMs)}`, stalled: true }
+    return { text: '处理中…', stalled: false }
+  }
+  return { text: '空闲', stalled: false }
 }
 
-/** 渲染一个树节点（递归），返回 DOM 元素。点击节点跳转到对应会话。 */
-function renderNode(node: TreeNode, threshold: number, onOpen: (id: string) => void): HTMLLIElement {
+/** 渲染一个树节点（递归）。根节点（顶层会话）蓝色点，当前会话加「当前」标记。 */
+function renderNode(
+  node: TreeNode,
+  threshold: number,
+  onOpen: (id: string) => void,
+  opts: { isRoot?: boolean; isCurrent?: boolean } = {},
+): HTMLLIElement {
   const { row } = node
   const li = document.createElement('li')
   const line = document.createElement('div')
@@ -292,28 +265,29 @@ function renderNode(node: TreeNode, threshold: number, onOpen: (id: string) => v
     onOpen(row.id)
   })
   const dot = document.createElement('span')
-  dot.className = `swd-dot ${row.status === 'running' ? 'swd-dot-running' : 'swd-dot-idle'}`
+  dot.className = opts.isRoot === true
+    ? 'swd-dot swd-dot-root'
+    : `swd-dot ${row.status === 'running' ? 'swd-dot-running' : 'swd-dot-idle'}`
   const idEl = document.createElement('span')
-  idEl.className = 'swd-id'
+  idEl.className = opts.isRoot === true ? 'swd-id swd-id-root' : 'swd-id'
   idEl.textContent = row.id.slice(0, 8)
   idEl.title = row.id
   line.appendChild(dot)
-  line.appendChild(idEl)
-  const stalled = row.status === 'running' && row.silentMs > threshold
-  const meta = document.createElement('span')
-  if (row.status === 'running') {
-    meta.className = stalled ? 'swd-stall' : 'swd-meta'
-    meta.textContent = stalled
-      ? `停滞 ${formatDuration(row.silentMs)}`
-      : `静默 ${formatDuration(row.silentMs)}`
-  } else {
-    // idle = 已停稳/等待中，不是停滞——不显示静默时长，避免误导。
-    meta.className = 'swd-meta'
-    meta.textContent = '空闲'
+  if (opts.isCurrent === true) {
+    const tag = document.createElement('span')
+    tag.className = 'swd-tag'
+    tag.textContent = '当前'
+    line.appendChild(tag)
   }
+  line.appendChild(idEl)
+  const { text, stalled } = statusText(row, threshold)
+  const meta = document.createElement('span')
+  meta.className = stalled ? 'swd-stall' : 'swd-meta'
+  meta.textContent = text
   line.appendChild(meta)
   li.appendChild(line)
-  if (row.lastReply !== undefined) {
+  // 有当前动作时节选已过时（动作即进展），隐藏；空闲/停滞时显示最近产出。
+  if (row.action === undefined && row.lastReply !== undefined) {
     const excerptEl = document.createElement('div')
     excerptEl.className = 'swd-excerpt'
     excerptEl.textContent = row.lastReply
@@ -359,8 +333,6 @@ class WatchdogWidget {
   private dragStartRight = 0
   private summonEl: HTMLButtonElement | null = null
   private visibilityCleanup: (() => void) | null = null
-  /** 树根 = 主 agent 会话（首次读到当前会话时锁定，跳转子代理不漂移）。 */
-  private rootId: string | undefined
 
   constructor(ctx: ClientContext) {
     this.ctx = ctx
@@ -558,25 +530,26 @@ class WatchdogWidget {
 
   private render(snapshot: WatchdogSnapshot): void {
     this.offlineEl.style.display = 'none'
-    // 锁定主 agent 根：首次读到当前会话即固定，之后点击子代理跳转不换根。
-    if (this.rootId === undefined) {
-      this.rootId = this.ctx.sessions.list.getSnapshot().current
-    }
-    const rootId = this.rootId
+    const currentId = this.ctx.sessions.list.getSnapshot().current
+    const forest = buildForest(snapshot.roots, snapshot.rows)
     this.treeEl.replaceChildren()
-    if (rootId === undefined) {
+    if (forest.length === 0) {
       const empty = document.createElement('div')
       empty.className = 'swd-empty'
-      empty.textContent = '无当前会话'
+      empty.textContent = '无活跃会话'
       this.treeEl.appendChild(empty)
       this.titleTextEl.textContent = 'Agent 看板'
       return
     }
-    const root = buildTree(snapshot.rows, rootId)
-    const total = countNodes(root) - 1
-    const runningCount = countRunningChildren(root)
+    const total = countNodes(forest)
+    const runningCount = countRunning(forest)
     this.titleTextEl.textContent = total === 0 ? 'Agent 看板' : `Agent ${runningCount}/${total}`
-    this.treeEl.appendChild(renderRoot(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id)))
+    for (const root of forest) {
+      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id), {
+        isRoot: true,
+        isCurrent: root.row.id === currentId,
+      }))
+    }
   }
 }
 
