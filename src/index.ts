@@ -155,6 +155,7 @@ declare module 'cordis' {
     'session/event'(session: SessionLike, event: SessionEventLike): void
     'session/disposed'(session: SessionLike): void
     'subagent/end'(info: SubagentEndInfoLike, parent: AgentLike): void
+    'agent/created'(payload: { agent: AgentLike }): void
     'agent/disposed'(payload: { agent: AgentLike }): void
   }
 }
@@ -338,8 +339,8 @@ export function apply(ctx: Context, config: Config): void {
     }
   })
 
-  // 启动预热：为已存在的会话回填标题（插件装配前产生的 session/title 事件）。
-  for (const agent of ctx.agents.list()) {
+  /** 从会话事件日志回填最新标题（session/title 事件，last-wins）。 */
+  const warmupTitle = (agent: AgentLike): void => {
     const events = agent.session.events
     for (let i = events.length - 1; i >= 0; i--) {
       const title = events[i].data?.title
@@ -349,6 +350,13 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
   }
+
+  // agent 装配（含重启后恢复装配）时回填标题：插件 apply 可能早于 agent
+  // 装配，且 session/title 是历史事件不会重放，必须在此兜底。
+  ctx.on('agent/created', ({ agent }) => warmupTitle(agent))
+
+  // 启动预热：为已存在的会话回填标题（插件装配前产生的 session/title 事件）。
+  for (const agent of ctx.agents.list()) warmupTitle(agent)
 
   /** 向停滞子代理的父会话注入一条 notice（静默排队，不唤醒模型）。 */
   const remind = (agent: AgentLike, silentForMs: number): void => {

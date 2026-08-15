@@ -27,8 +27,9 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { useEffect, useState } from 'react'
 import type { AgentSnapshotRow, AgentBoardSnapshot } from '../index.js'
 
-/** Poll interval (ms) while the tab is visible. */
-const POLL_MS = 5000
+/** Poll interval (ms) while the tab is visible. 2s：状态/动作切换的感知延迟
+ *  主要来自此周期；更快需要事件推送（SSE），暂未做。 */
+const POLL_MS = 2000
 
 /** localStorage key for the widget position + visibility. */
 const LS_KEY = 'dsh.agentBoard.v1'
