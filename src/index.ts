@@ -37,9 +37,9 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  scanIntervalMs: Schema.natural().min(5_000).default(20_000),
-  stallThresholdMs: Schema.natural().min(10_000).default(60_000),
-  remindIntervalMs: Schema.natural().min(10_000).default(60_000),
+  scanIntervalMs: Schema.natural().min(5_000).default(60_000),
+  stallThresholdMs: Schema.natural().min(10_000).default(600_000),
+  remindIntervalMs: Schema.natural().min(10_000).default(600_000),
 })
 
 // ---------------------------------------------------------------- 结构面
