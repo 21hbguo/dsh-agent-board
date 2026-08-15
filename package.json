@@ -1,0 +1,33 @@
+{
+  "name": "@dsh-external/dsh-subagent-watchdog",
+  "version": "0.1.0",
+  "description": "子代理停滞检测器：后台 subagent 静默超过阈值时，自动往父会话注入 notice 提醒（催/中断/继续等），无需老板轮询",
+  "private": true,
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/types/index.d.ts",
+  "files": [
+    "lib",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "license": "BSD-3-Clause",
+  "peerDependencies": {
+    "cordis": ">=4.0.0-rc <5",
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.0"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
