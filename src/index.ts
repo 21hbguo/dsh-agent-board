@@ -263,7 +263,10 @@ export function apply(ctx: Context, config: Config): void {
       const parsed = JSON.parse(readFileSync(ARCHIVE_PATH, 'utf8')) as { records?: Array<AgentSnapshotRow & { endedAt: number }> }
       const now = Date.now()
       for (const record of parsed.records ?? []) {
-        if (now - record.endedAt <= ARCHIVE_KEEP_MS) settledArchive.set(record.id, record)
+        if (now - record.endedAt <= ARCHIVE_KEEP_MS) {
+          // 旧版存档无 createdAt：用 lastActivity 兜底（稳定排序键）。
+          settledArchive.set(record.id, { ...record, createdAt: record.createdAt ?? record.lastActivity })
+        }
       }
     } catch (error) {
       ctx.logger.warn(`[agent-board] 存档读盘失败: ${error instanceof Error ? error.message : String(error)}`)
