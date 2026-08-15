@@ -1,5 +1,5 @@
 /**
- * @dsh-external/dsh-subagent-watchdog — 子代理停滞检测器（host 半区）。
+ * @dsh-external/dsh-agent-board — 子代理停滞检测器（host 半区）。
  *
  * 问题背景：后台子代理（subagent）卡住时——工具调用死等、LLM 挂起、自循环、
  * 等待永远不来的输入——父会话（老板）收不到任何信号。宿主只在子代理真正
@@ -20,9 +20,9 @@
  * 「可能是长任务」。同一子代理的重复提醒受 remindIntervalMs 节流。
  *
  * 阈值可用环境变量覆盖（便于测试与按任务调优）：
- *   DSH_WATCHDOG_SCAN_MS / DSH_WATCHDOG_STALL_MS / DSH_WATCHDOG_REMIND_MS
+ *   DSH_AGENT_BOARD_SCAN_MS / DSH_AGENT_BOARD_STALL_MS / DSH_AGENT_BOARD_REMIND_MS
  *
- * 另注册 `GET /api/subagent-watchdog/agents` JSON 快照端点，供浏览器半区
+ * 另注册 `GET /api/agent-board/agents` JSON 快照端点，供浏览器半区
  * （侧边栏「子代理监控」面板）轮询展示：每个子代理的状态、最后活动时间、
  * 静默时长（与阈值对比高亮）。
  */
@@ -30,9 +30,9 @@ import type { Context } from 'cordis'
 import Schema from 'schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
-import { makeWatchdogRoutes } from './routes.js'
+import { makeAgentBoardRoutes } from './routes.js'
 
-export const name = '@dsh-external/dsh-subagent-watchdog'
+export const name = '@dsh-external/dsh-agent-board'
 export const inject = ['agents', 'webServer', 'subagents'] as const
 
 /** 配置：扫描周期 / 停滞阈值 / 重复提醒节流（毫秒）。 */
@@ -79,7 +79,7 @@ export interface AgentSnapshotRow {
 }
 
 /** 一次快照的完整载荷。 */
-export interface WatchdogSnapshot {
+export interface AgentBoardSnapshot {
   readonly now: number
   readonly stallThresholdMs: number
   /** 顶层会话（主 agent 们），每个下面挂自己的子代理树。 */
@@ -213,9 +213,9 @@ function toolArgsSummary(raw: string): string {
 const ACTION_MAX = 60
 
 export function apply(ctx: Context, config: Config): void {
-  const scanIntervalMs = envMs('DSH_WATCHDOG_SCAN_MS') ?? config.scanIntervalMs
-  const stallThresholdMs = envMs('DSH_WATCHDOG_STALL_MS') ?? config.stallThresholdMs
-  const remindIntervalMs = envMs('DSH_WATCHDOG_REMIND_MS') ?? config.remindIntervalMs
+  const scanIntervalMs = envMs('DSH_AGENT_BOARD_SCAN_MS') ?? config.scanIntervalMs
+  const stallThresholdMs = envMs('DSH_AGENT_BOARD_STALL_MS') ?? config.stallThresholdMs
+  const remindIntervalMs = envMs('DSH_AGENT_BOARD_REMIND_MS') ?? config.remindIntervalMs
 
   /** 会话 id → 最后一条 session 事件时间（Unix ms）。 */
   const lastActivity = new Map<string, number>()
@@ -244,7 +244,7 @@ export function apply(ctx: Context, config: Config): void {
         }
       })
       .catch(error => {
-        ctx.logger.warn(`[watchdog] label 解析失败 ${id}: ${error instanceof Error ? error.message : String(error)}`)
+        ctx.logger.warn(`[agent-board] label 解析失败 ${id}: ${error instanceof Error ? error.message : String(error)}`)
       })
       .finally(() => { labelPending.delete(id) })
   }
@@ -361,18 +361,18 @@ export function apply(ctx: Context, config: Config): void {
     const summary = `子代理 ${agent.id.slice(0, 8)} 已静默 ${formatSilent(silentForMs)}，可能卡住（也可能是长任务）`
     const message = createUserMessage({
       content: [
-        { type: 'text', text: `[watchdog] ${summary}（最后活动 ${lastAt}）。` },
+        { type: 'text', text: `[agent-board] ${summary}（最后活动 ${lastAt}）。` },
         { type: 'text', text: '处理建议：send_message 催一下进度；interrupt_agent 中断后重派；确认是长任务请忽略本条。' },
       ],
       source: {
         kind: 'plugin',
-        plugin: 'dsh-subagent-watchdog',
+        plugin: 'dsh-agent-board',
         form: 'notice',
         summary: boundContextSummary(summary),
       },
     })
     parent.inject(message)
-    ctx.logger.info(`[watchdog] ${summary}; notice injected into parent ${parentId}`)
+    ctx.logger.info(`[agent-board] ${summary}; notice injected into parent ${parentId}`)
   }
 
   /** 一轮扫描：找「running 但静默超阈值」的子代理。 */
@@ -396,11 +396,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => {
     const timer = setInterval(scan, scanIntervalMs)
     return () => clearInterval(timer)
-  }, 'watchdog.scan')
+  }, 'agent-board.scan')
 
   // JSON 快照：浏览器半区的「Agent 看板」轮询此端点。顶层会话进 roots，
   // 子代理进 rows（parentSession 关联成树）。
-  const snapshot = (): WatchdogSnapshot => {
+  const snapshot = (): AgentBoardSnapshot => {
     const now = Date.now()
     const roots: AgentSnapshotRow[] = []
     const rows: AgentSnapshotRow[] = []
@@ -444,12 +444,12 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   ctx.effect(() => {
-    const disposers = makeWatchdogRoutes({ snapshot }).map(route => ctx.webServer.register(route))
+    const disposers = makeAgentBoardRoutes({ snapshot }).map(route => ctx.webServer.register(route))
     return () => { for (const dispose of disposers) dispose() }
-  }, 'watchdog: routes')
+  }, 'agent-board: routes')
 
   ctx.logger.info(
-    `[watchdog] armed: stall=%dms scan=%dms remind=%dms`,
+    `[agent-board] armed: stall=%dms scan=%dms remind=%dms`,
     stallThresholdMs,
     scanIntervalMs,
     remindIntervalMs,

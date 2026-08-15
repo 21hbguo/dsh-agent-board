@@ -1,5 +1,5 @@
 {
-  "name": "@dsh-external/dsh-subagent-watchdog",
+  "name": "@dsh-external/dsh-agent-board",
   "version": "0.1.0",
   "description": "子代理停滞检测器：后台 subagent 静默超过阈值时，自动往父会话注入 notice 提醒（催/中断/继续等），侧边栏面板实时展示各子代理状态",
   "private": true,

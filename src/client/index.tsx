@@ -1,11 +1,11 @@
 /**
- * @dsh-external/dsh-subagent-watchdog — 浏览器半区：常驻 Agent 看板。
+ * @dsh-external/dsh-agent-board — 浏览器半区：常驻 Agent 看板。
  *
  * A persistent always-on-top floating window (top-right by default) that
  * renders the live agent tree — the current session as root, its subagents
  * branching down — with per-node status (running / idle / stalled highlight),
  * silent duration, latest reply excerpt, and last activity. Polls
- * `GET /api/subagent-watchdog/agents` every {@link POLL_MS}; the poll pauses
+ * `GET /api/agent-board/agents` every {@link POLL_MS}; the poll pauses
  * while the tab is hidden.
  *
  * Interactions (same pattern as dsh-sysmon's widget): drag the title bar to
@@ -16,7 +16,7 @@
  *
  * Failure policy: transport errors render an "offline" hint and keep the poll
  * alive; nothing throws (the web shell fails boot on apply throw).
- * @module @dsh-external/dsh-subagent-watchdog/client
+ * @module @dsh-external/dsh-agent-board/client
  */
 
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -25,16 +25,16 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { useEffect, useState } from 'react'
-import type { AgentSnapshotRow, WatchdogSnapshot } from '../index.js'
+import type { AgentSnapshotRow, AgentBoardSnapshot } from '../index.js'
 
 /** Poll interval (ms) while the tab is visible. */
 const POLL_MS = 5000
 
 /** localStorage key for the widget position + visibility. */
-const LS_KEY = 'dsh.subagentWatchdog.v1'
+const LS_KEY = 'dsh.agentBoard.v1'
 
 /** Toggle event fired by the sidebar footer action. */
-const TOGGLE_EVENT = 'dsh.subagentWatchdog.toggle'
+const TOGGLE_EVENT = 'dsh.agentBoard.toggle'
 
 /** Default widget position (px from the viewport top/right edges). */
 const DEFAULT_TOP = 64
@@ -351,7 +351,7 @@ function openSession(ctx: ClientContext, id: string): void {
 }
 
 /** 常驻悬浮窗：树形展示子代理层级 + 状态。 */
-class WatchdogWidget {
+class AgentBoardWidget {
   private readonly ctx: ClientContext
   private readonly state: WidgetState
   private readonly root: HTMLDivElement
@@ -373,7 +373,7 @@ class WatchdogWidget {
   private summonEl: HTMLButtonElement | null = null
   private visibilityCleanup: (() => void) | null = null
   /** 最近一次快照（会话切换时即时重渲染用）。 */
-  private lastSnapshot: WatchdogSnapshot | null = null
+  private lastSnapshot: AgentBoardSnapshot | null = null
   /** 用户手动折叠的根（idle 根默认折叠，除非在 expandedRoots）。 */
   private readonly collapsedRoots = new Set<string>()
   /** 用户手动展开的根（覆盖 idle 默认折叠）。 */
@@ -575,8 +575,8 @@ class WatchdogWidget {
   private poll(): void {
     if (this.fetching || document.hidden) return
     this.fetching = true
-    void fetch('/api/subagent-watchdog/agents')
-      .then(res => { if (!res.ok) throw new Error(String(res.status)); return res.json() as Promise<WatchdogSnapshot> })
+    void fetch('/api/agent-board/agents')
+      .then(res => { if (!res.ok) throw new Error(String(res.status)); return res.json() as Promise<AgentBoardSnapshot> })
       .then(snapshot => {
         this.lastSnapshot = snapshot
         this.render(snapshot)
@@ -589,7 +589,7 @@ class WatchdogWidget {
       .finally(() => { this.fetching = false })
   }
 
-  private render(snapshot: WatchdogSnapshot): void {
+  private render(snapshot: AgentBoardSnapshot): void {
     this.offlineEl.style.display = 'none'
     const currentId = this.ctx.sessions.list.getSnapshot().current
     if (currentId !== undefined) this.visitedSessions.add(currentId)
@@ -660,7 +660,7 @@ function ensureStyles(): void {
 }
 
 /** 侧边栏 foot 触发器（rail 时仅图标，wide 时图标 + 文字）。 */
-function WatchdogAction(props: { wide: boolean }) {
+function AgentBoardAction(props: { wide: boolean }) {
   const [active, setActive] = useState(false)
   useEffect(() => {
     const onToggle = (): void => setActive(v => !v)
@@ -690,13 +690,13 @@ export const inject = ['slots', 'sessions'] as const
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.slots.register({
     name: 'sidebar.footer.action',
-    id: 'dsh-subagent-watchdog',
+    id: 'dsh-agent-board',
     order: 100,
     inject: () => ({}),
-  }, WatchdogAction), 'watchdog: footer action')
+  }, AgentBoardAction), 'agent-board: footer action')
   ctx.effect(() => {
-    const widget = new WatchdogWidget(ctx)
+    const widget = new AgentBoardWidget(ctx)
     widget.mount()
     return () => widget.dispose()
-  }, 'watchdog: floating window')
+  }, 'agent-board: floating window')
 }

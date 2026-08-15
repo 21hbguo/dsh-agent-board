@@ -1,4 +1,4 @@
-# dsh-subagent-watchdog
+# dsh-agent-board
 
 DSH 宿主插件：**Agent 看板 + 子代理停滞检测器**。
 
@@ -35,7 +35,7 @@ DSH 里后台子代理**卡住**时（工具调用死等、LLM 挂起、自循�
 | `stallThresholdMs` | 600000 | 静默多久算停滞（10 分钟） |
 | `remindIntervalMs` | 600000 | 同一子代理两次提醒的最小间隔 |
 
-环境变量覆盖（便于按任务调优、测试）：`DSH_WATCHDOG_SCAN_MS` / `DSH_WATCHDOG_STALL_MS` / `DSH_WATCHDOG_REMIND_MS`（毫秒）。
+环境变量覆盖（便于按任务调优、测试）：`DSH_AGENT_BOARD_SCAN_MS` / `DSH_AGENT_BOARD_STALL_MS` / `DSH_AGENT_BOARD_REMIND_MS`（毫秒）。
 
 ## 误报控制
 

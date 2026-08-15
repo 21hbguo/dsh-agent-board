@@ -1,6 +1,6 @@
 import type { UserConfig } from 'tsdown'
 
-const PLUGIN_ID = '@dsh-external/dsh-subagent-watchdog'
+const PLUGIN_ID = '@dsh-external/dsh-agent-board'
 
 // The client bundle stays tiny: react and the dsh client surfaces are
 // externals provided by the web shell at runtime; everything else is plain

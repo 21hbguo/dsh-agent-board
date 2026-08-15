@@ -1,7 +1,7 @@
-# dsh-subagent-watchdog bundle patch: inserts its plugin row into the web
+# dsh-agent-board bundle patch: inserts its plugin row into the web
 # plugin roster. The single row mounts BOTH halves: the host side (stall
-# detector + /api/subagent-watchdog/agents route) and the browser side (the
+# detector + /api/agent-board/agents route) and the browser side (the
 # sidebar footer action + floating panel, served from lib/client.js).
 - insert:
-    - id: subagent-watchdog
-      name: '@dsh-external/dsh-subagent-watchdog'
+    - id: agent-board
+      name: '@dsh-external/dsh-agent-board'

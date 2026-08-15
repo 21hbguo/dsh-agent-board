@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build dsh-subagent-watchdog: compile src/ → lib/ with the dsh checkout's tsc,
+# Build dsh-agent-board: compile src/ → lib/ with the dsh checkout's tsc,
 # then bundle the browser half with tsdown (lib/client.js).
 # Requires DSH_CHECKOUT pointing at a dsh source checkout (auto-probe below).
 set -euo pipefail
