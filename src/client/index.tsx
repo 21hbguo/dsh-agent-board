@@ -231,12 +231,7 @@ function buildForest(roots: readonly AgentSnapshotRow[], rows: readonly AgentSna
     }
   }
   for (const root of forest) attach(root)
-  // 子节点按静默时长升序（活跃的在前）。
-  const sortNodes = (nodes: TreeNode[]): void => {
-    nodes.sort((a, b) => a.row.silentMs - b.row.silentMs)
-    for (const n of nodes) sortNodes(n.children)
-  }
-  for (const root of forest) sortNodes(root.children)
+  // 渲染顺序 = 快照顺序（host 已按创建时间稳定排序）——节点位置不随活动跳动。
   return forest
 }
 

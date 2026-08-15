@@ -67,6 +67,8 @@ export interface AgentSnapshotRow {
   /** 委派深度（0 = 顶层会话，子代理 ≥ 1）。 */
   readonly depth: number
   readonly parentSession?: string
+  /** 会话创建时间（Unix ms）——稳定排序键，保证看板节点位置不跳动。 */
+  readonly createdAt: number
   /** 最后一条 session 事件时间（Unix ms），无事件时回退到会话创建时间。 */
   readonly lastActivity: number
   /** 距最后活动的毫秒数。 */
@@ -367,6 +369,7 @@ export function apply(ctx: Context, config: Config): void {
       status: 'finished',
       depth: header.delegationDepth ?? 0,
       parentSession: header.parentSession,
+      createdAt: header.createdAt,
       lastActivity: last,
       silentMs: 0,
       ...(lastReply.has(agent.id) ? { lastReply: excerpt(lastReply.get(agent.id)!) } : {}),
@@ -482,6 +485,7 @@ export function apply(ctx: Context, config: Config): void {
         status: agent.status,
         depth: header.delegationDepth ?? 0,
         parentSession: header.parentSession,
+        createdAt: header.createdAt,
         lastActivity: last,
         silentMs: now - last,
         ...(lastReply.has(agent.id) ? { lastReply: excerpt(lastReply.get(agent.id)!) } : {}),
@@ -505,8 +509,10 @@ export function apply(ctx: Context, config: Config): void {
       }
       rows.push({ ...record, silentMs: now - record.lastActivity })
     }
-    roots.sort((a, b) => b.lastActivity - a.lastActivity)
-    rows.sort((a, b) => a.depth - b.depth || a.silentMs - b.silentMs)
+    // 稳定排序：按创建时间（新的在上），位置不随时间跳动；
+    // 存档行 createdAt 与 live 行同键，混排一致。
+    roots.sort((a, b) => b.createdAt - a.createdAt)
+    rows.sort((a, b) => a.depth - b.depth || b.createdAt - a.createdAt)
     return { now, stallThresholdMs, roots, rows }
   }
 
