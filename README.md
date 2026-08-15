@@ -1,51 +1,87 @@
 # dsh-agent-board
 
-DSH 宿主插件：**Agent 看板 + 子代理停滞检测器**。
+> **DSH（DeepSeek Harness）Agent 实时看板** —— 主 agent 与子代理的树形层级监控，停滞自动告警，点击直达会话。老板视角，一眼看清谁在跑、干到哪、卡没卡。
 
-- **Agent 看板**（常驻悬浮窗）：以当前会话（主 agent）为根的子代理层级树——每个节点显示状态（running/idle/停滞高亮）、静默时长、最新答复节选，点击节点直达对应会话；
-- **停滞检测**：后台 subagent 静默超过阈值时，自动往其父会话注入 notice 提醒——老板不用轮询 `list_agents` 催进度，卡了会自动知道。
+```
+◉ 当前 主代理轮询与进度监控   ⚙ bash: npm run build …
+ ┣━ ● 子代理1-调研DSH API面   调研完成，方案已定稿…
+ ┃   ┗━ ● 子代理1-验证实现    完成
+ ┣━ ● 子代理2-实现看板悬浮窗  ✍ 输出中…
+ ┗━ ● 子代理3-写测试          ⚙ bash: pytest -x …
+```
 
-## 解决的问题
+---
 
-DSH 里后台子代理**卡住**时（工具调用死等、LLM 挂起、自循环、等待永远不来的输入），父会话收不到任何信号：
+## ✨ 特性
 
-- `subagent-settled` 通知只在子代理真正 settle 时才投递，而卡住的 agent 可以**永远不 settle**；
-- `list_agents` 只返回 `running/idle/ready`，没有活动时间戳，"running" ≠ "活着"；
-- 宿主没有 turn 级超时兜底（唯一的 5 分钟流空闲超时在 LLM 适配器，且流持续吐数据就永不触发）。
+| | 特性 | 说明 |
+|---|---|---|
+| 🎯 | **树形层级图** | 以主 agent（实心圆）为根、子代理（空心圆）为分支的层级森林；多主会话并排显示；颜色即状态（绿=working / 蓝=完成 / 灰=空闲 / 红=停滞） |
+| ⚡ | **SSE 实时推送** | 数据变化事件级推送，看板即时刷新；断线自动回退轮询兜底 |
+| 🚦 | **三态生命周期** | working（在跑）→ **完成**（settle 后存档保留在板上，方便点进去看）→ 点开后转空闲 → 空闲超时自动消失 |
+| 🔔 | **停滞自动告警** | 子代理静默超过阈值（默认 10 分钟）→ 自动向父会话注入 notice 提醒（GUI 可见、不唤醒模型、不耗 API 额度）——不再需要手动轮询 `list_agents` 催进度 |
+| 📝 | **进展一目了然** | 每个节点同行显示：当前动作（正在执行的命令 `⚙` / 输出中 `✍`）+ 最新答复节选 + 状态；工具与文本都是实时信号 |
+| 🖱️ | **点击直达** | 点任意节点跳转到对应会话（含已完成的子代理）；当前会话带「当前」标记 |
+| 💾 | **跨重启持久** | 完成态存档落盘（`~/.dsh/agent-board-archive.json`），重启后不丢；会话标题/名字自动恢复 |
+| 🪟 | **常驻悬浮窗** | 可拖拽、折叠、隐藏（右下角召唤）；侧边栏「Agent 看板」按钮开关；位置状态持久化 |
 
-## Agent 看板（悬浮窗）
+## 🧩 解决的问题
 
-- 常驻右上角，**树形层级图**：根 = 当前会话（主 agent，蓝色「主」标记，固定不随跳转漂移），子代理按血缘发散（虚线树线、深度缩进）；
-- 每个节点：状态点（绿 running / 灰 idle）、静默时长、**最新答复节选**（80 字符，悬停看全文）、停滞红色高亮；
-- **点击节点跳转到对应会话**（优先 catalog 子代理地址，兜底普通 open）；
-- 交互：标题栏拖拽移动、点击折叠、`×` 隐藏（右下角召唤按钮）、侧边栏「Agent 看板」按钮 toggle；位置/显隐 localStorage 持久化；标签页隐藏自动暂停轮询。
+DSH 的后台子代理**卡住**时（工具死等、LLM 挂起、自循环），父会话收不到任何信号：
 
-## 停滞检测
+- `subagent-settled` 通知只在子代理**真正结束**时才投递——而卡住的 agent 可以**永远不 settle**；
+- `list_agents` 只有 `running/idle/ready`，没有活动时间戳——"running" ≠ "活着"；
+- 宿主没有 turn 级超时兜底。
 
-1. 监听全局 `session/event`（每个事件自带毫秒时间戳，精确到最后一条 chunk/工具事件），维护每个子代理的**最后活动时间**；
-2. 定时扫描所有 `running` 的子代理，静默超过阈值（默认 10 分钟）时，向它的父会话注入一条 `{kind:'plugin', form:'notice'}` 消息；
-3. notice 静默排队进父会话 inbox——**GUI 可见、不唤醒模型、不耗 API 额度**，老板在下一个自然 step 看到提醒，自行决定：`send_message` 催一下 / `interrupt_agent` 中断重派 / 确认是长任务则忽略；
-4. 同一子代理重复提醒受节流（默认 10 分钟一次），子代理结束/销毁即清账。
+**dsh-agent-board 补齐这个洞**：以 session 事件流为精确活动信号（毫秒级时间戳，最后一条 chunk/工具事件即"活着"），看板 + 自动告警双通道，老板不再需要轮询。
 
-## 配置
+## 📦 安装
+
+DSH 插件（host + client），本地构建注入即可，无需 npm 发布：
+
+```bash
+# 1. 构建（依赖 DSH checkout，自动探测 DSH_CHECKOUT）
+bash scripts/build.sh          # 或 DSH 的 dev_build_plugin
+
+# 2. 注入运行中的实例
+#    使用 DSH 的 dev_inject_plugin / dev_install_package
+#    注入后刷新浏览器页面，右上角出现「Agent 看板」悬浮窗
+```
+
+> 重启后自动恢复：注入 registry + junction 持久装配（`dev_inject_plugin` 标准机制）。
+
+## ⚙️ 配置
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `scanIntervalMs` | 60000 | 扫描周期 |
+| `scanIntervalMs` | 60000 | 停滞扫描周期 |
 | `stallThresholdMs` | 600000 | 静默多久算停滞（10 分钟） |
-| `remindIntervalMs` | 600000 | 同一子代理两次提醒的最小间隔 |
+| `remindIntervalMs` | 600000 | 同一子代理两次提醒最小间隔 |
 
-环境变量覆盖（便于按任务调优、测试）：`DSH_AGENT_BOARD_SCAN_MS` / `DSH_AGENT_BOARD_STALL_MS` / `DSH_AGENT_BOARD_REMIND_MS`（毫秒）。
+环境变量覆盖：`DSH_AGENT_BOARD_SCAN_MS` / `DSH_AGENT_BOARD_STALL_MS` / `DSH_AGENT_BOARD_REMIND_MS`（毫秒，重启或重载后生效）。
 
-## 误报控制
+## 🔧 工作原理
 
-- 默认阈值 10 分钟，高于 LLM 适配器的流空闲兜底（5 分钟断流），纯模型挂起会被适配器兜底（产生事件或 settle），不会误报；
-- 主要误报来源是长时间无输出的工具调用（`sleep`、大构建、长测试），notice 文案会提示「可能是长任务」。
+1. **活动记账**：监听全局 `session/event`（每个事件自带毫秒时间戳），维护每个会话的「最后活动时间」「最新答复节选」「当前动作」——工具执行中最后事件是 `tool/call`（含命令），流式输出中最后事件是 `assistant/chunk`，天然可推断"正在做什么"；
+2. **停滞检测**：定时扫描 running 子代理，静默超阈值 → 向父会话注入 `{kind:'plugin', form:'notice'}`（GUI 可见、不唤醒模型）；
+3. **完成存档**：子代理 settle 时把最终信息（创建名/答复/父会话）存档并**落盘**——完成态保留在板上，点进去才转空闲，空闲超时消失；
+4. **实时推送**：数据变化（任何相关事件，500ms 节流合并）→ SSE 推送 `changed` 信号 → 浏览器立即拉快照；2s 轮询作兜底；
+5. **树形组装**：快照返回所有 live 顶层会话（roots）+ 子代理（rows），浏览器按 `parentSession` 血缘组装成森林，每个主 agent 一棵树。
 
-## 开发
+### 状态模型
 
-```bash
-bash scripts/build.sh   # 编译 src → lib + tsdown 打包 client
+```
+working ──完成──▶ 完成（蓝，存档保留，可点入）──点进去──▶ 空闲（灰）──30分钟──▶ 消失
+ 绿
 ```
 
-构建依赖 DSH checkout（`DSH_CHECKOUT` 环境变量或常见路径自动探测）。注入运行中的实例用 DSH 的 `dev_inject_plugin` / `dev_install_package`；更新代码用 `dev_build_plugin` + `dev_reload_package`（client 已在注册表时 reload 会自动联动新 bundle 到浏览器）。
+## 🗂️ API
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/agent-board/agents` | JSON 快照（roots + rows + label/action/reply/status） |
+| `GET /api/agent-board/stream` | SSE 数据变化信号（`data: changed`） |
+
+## 📄 License
+
+BSD-3-Clause
