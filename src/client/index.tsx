@@ -115,7 +115,8 @@ const WIDGET_CSS = `
 .swd-close:hover { color: #fff; }
 .swd-body { overflow-y: auto; padding: 6px 8px; }
 .swd-tree { margin: 0; padding: 0; list-style: none; }
-.swd-tree ul { margin: 0; padding: 0 0 0 14px; list-style: none; border-left: 1px dashed rgba(154, 208, 255, 0.25); }
+/* 子代理层级：每层 28px 缩进 + 树线（根行有 ▸ 占位约 15px，加大缩进保证层级错开明显） */
+.swd-tree ul { margin: 0; padding: 0 0 0 28px; list-style: none; border-left: 1px dashed rgba(154, 208, 255, 0.35); }
 .swd-node {
   display: flex;
   align-items: baseline;
