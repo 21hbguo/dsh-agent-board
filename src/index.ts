@@ -30,6 +30,9 @@ import type { Context } from 'cordis'
 import Schema from 'schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { makeAgentBoardRoutes } from './routes.js'
 
 export const name = '@dsh-external/dsh-agent-board'
@@ -233,6 +236,53 @@ export function apply(ctx: Context, config: Config): void {
   /** 正在查询 label 的子代理 id（去重）。 */
   const labelPending = new Set<string>()
 
+  // ---------------------------------------------------------- 存档持久化
+  /** 完成态存档落盘路径（~/.dsh/agent-board-archive.json，重启恢复）。 */
+  const ARCHIVE_PATH = join(homedir(), '.dsh', 'agent-board-archive.json')
+  let persistTimer: NodeJS.Timeout | undefined
+  const persistArchive = (): void => {
+    if (persistTimer !== undefined) return
+    persistTimer = setTimeout(() => {
+      persistTimer = undefined
+      try {
+        const body = JSON.stringify({ records: [...settledArchive.values()] })
+        const tmp = `${ARCHIVE_PATH}.tmp`
+        mkdirSync(homedir() + '/.dsh', { recursive: true })
+        writeFileSync(tmp, body, 'utf8')
+        renameSync(tmp, ARCHIVE_PATH)
+      } catch (error) {
+        ctx.logger.warn(`[agent-board] 存档写盘失败: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }, 300)
+  }
+  const loadArchive = (): void => {
+    try {
+      if (!existsSync(ARCHIVE_PATH)) return
+      const parsed = JSON.parse(readFileSync(ARCHIVE_PATH, 'utf8')) as { records?: Array<AgentSnapshotRow & { endedAt: number }> }
+      const now = Date.now()
+      for (const record of parsed.records ?? []) {
+        if (now - record.endedAt <= ARCHIVE_KEEP_MS) settledArchive.set(record.id, record)
+      }
+    } catch (error) {
+      ctx.logger.warn(`[agent-board] 存档读盘失败: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  // ---------------------------------------------------------- SSE 推送
+  /** SSE 客户端连接（浏览器 EventSource）。 */
+  const sseClients = new Set<import('node:http').ServerResponse>()
+  let notifyTimer: NodeJS.Timeout | undefined
+  /** 数据变化信号（节流 500ms 合并高频事件，如流式 chunk）。 */
+  const notifyChanged = (): void => {
+    if (notifyTimer !== undefined) return
+    notifyTimer = setTimeout(() => {
+      notifyTimer = undefined
+      for (const res of sseClients) {
+        try { res.write('data: changed\n\n') } catch { /* 已断开连接忽略 */ }
+      }
+    }, 500)
+  }
+
   /** 懒解析子代理创建名：对父会话调 listChildren 一次拿全部直接子。 */
   const ensureLabel = (id: string, parentSession: string | undefined): void => {
     if (parentSession === undefined) return
@@ -296,6 +346,7 @@ export function apply(ctx: Context, config: Config): void {
       default:
         break
     }
+    notifyChanged()
   })
 
   /** 已 settle 的子代理存档（完成态，供看板保留「点进去之前」的记录）。 */
@@ -323,13 +374,19 @@ export function apply(ctx: Context, config: Config): void {
       ...(titleCache.get(agent.id) !== undefined ? { title: titleCache.get(agent.id)! } : {}),
       endedAt,
     })
+    persistArchive()
+    notifyChanged()
   }
+
+  // 启动时恢复持久化存档（重启后完成态不丢）。
+  loadArchive()
 
   // 结束/销毁即清账：先存档（读各记账 Map），再清理。
   ctx.on('subagent/end', info => {
     const agent = ctx.agents.get(info.id)
     if (agent !== undefined) archiveSettled(agent)
     forget(info.id)
+    notifyChanged()
   })
   ctx.on('session/disposed', session => forget(session.id))
   ctx.on('agent/disposed', ({ agent }) => {
@@ -337,6 +394,7 @@ export function apply(ctx: Context, config: Config): void {
       archiveSettled(agent)
       forget(agent.id)
     }
+    notifyChanged()
   })
 
   /** 从会话事件日志回填最新标题（session/title 事件，last-wins）。 */
@@ -442,6 +500,7 @@ export function apply(ctx: Context, config: Config): void {
     for (const [id, record] of settledArchive) {
       if (now - record.endedAt > ARCHIVE_KEEP_MS) {
         settledArchive.delete(id)
+        persistArchive()
         continue
       }
       rows.push({ ...record, silentMs: now - record.lastActivity })
@@ -451,8 +510,18 @@ export function apply(ctx: Context, config: Config): void {
     return { now, stallThresholdMs, roots, rows }
   }
 
+  // SSE 心跳：30s 注释帧防代理断连。
   ctx.effect(() => {
-    const disposers = makeAgentBoardRoutes({ snapshot }).map(route => ctx.webServer.register(route))
+    const heartbeat = setInterval(() => {
+      for (const res of sseClients) {
+        try { res.write(': ping\n\n') } catch { /* 已断开忽略 */ }
+      }
+    }, 30_000)
+    return () => clearInterval(heartbeat)
+  }, 'agent-board: sse heartbeat')
+
+  ctx.effect(() => {
+    const disposers = makeAgentBoardRoutes({ snapshot, sseClients }).map(route => ctx.webServer.register(route))
     return () => { for (const dispose of disposers) dispose() }
   }, 'agent-board: routes')
 

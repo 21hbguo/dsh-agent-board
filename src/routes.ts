@@ -1,7 +1,8 @@
 /**
- * dsh-agent-board HTTP routes — the browser half polls a single
- * same-origin JSON endpoint for the live subagent snapshot. One tiny surface:
- * `GET /api/agent-board/agents` answered from the agent-board's ledger.
+ * dsh-agent-board HTTP routes — the browser half polls one same-origin JSON
+ * endpoint for the live snapshot, and subscribes to one SSE endpoint for
+ * instant "data changed" signals (the poll stays as fallback/reconnect).
+ * `GET /api/agent-board/agents` and `GET /api/agent-board/stream`.
  * @module @dsh-external/dsh-agent-board/routes
  */
 
@@ -19,8 +20,12 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** Build the full route family for one agent-board snapshot provider. */
-export function makeAgentBoardRoutes(deps: { snapshot: () => AgentBoardSnapshot }): WebRoute[] {
-  const { snapshot } = deps
+export function makeAgentBoardRoutes(deps: {
+  snapshot: () => AgentBoardSnapshot
+  /** SSE 客户端集合：连接注册/注销由路由管理，心跳与信号帧由宿主写入。 */
+  sseClients: Set<ServerResponse>
+}): WebRoute[] {
+  const { snapshot, sseClients } = deps
   return [
     {
       kind: 'exact',
@@ -31,6 +36,25 @@ export function makeAgentBoardRoutes(deps: { snapshot: () => AgentBoardSnapshot 
           return
         }
         json(res, 200, snapshot())
+      },
+    },
+    {
+      kind: 'exact',
+      path: `${AGENT_BOARD_API_PREFIX}/stream`,
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        if (req.method !== 'GET') {
+          json(res, 405, { ok: false, error: 'method-not-allowed' })
+          return
+        }
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+          'x-accel-buffering': 'no',
+        })
+        res.write(': connected\n\n')
+        sseClients.add(res)
+        req.on('close', () => { sseClients.delete(res) })
       },
     },
   ]

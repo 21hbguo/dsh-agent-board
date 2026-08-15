@@ -428,6 +428,8 @@ class AgentBoardWidget {
   /** 用户点进去看过（visited）的会话：完成项点开后转空闲，超时消失。 */
   private readonly visitedSessions = new Set<string>()
   private unsubscribeList: (() => void) | null = null
+  /** SSE 订阅：数据变化信号 → 立即拉快照（轮询保留为兜底）。 */
+  private sseSource: EventSource | null = null
 
   constructor(ctx: ClientContext) {
     this.ctx = ctx
@@ -500,7 +502,7 @@ class AgentBoardWidget {
     this.bodyEl.style.display = this.state.collapsed ? 'none' : 'block'
   }
 
-  /** 挂载进 DOM 并开始轮询（仅可见时轮询）。 */
+  /** 挂载进 DOM 并开始轮询（仅可见时轮询）；同时订阅 SSE 即时信号。 */
   mount(): void {
     ensureStyles()
     if (this.state.visible) document.body.appendChild(this.root)
@@ -508,6 +510,9 @@ class AgentBoardWidget {
     this.renderSummon()
     this.start()
     this.poll()
+    // SSE：数据变化即时刷新（EventSource 自动重连；失败退化为轮询兜底）。
+    this.sseSource = new EventSource('/api/agent-board/stream')
+    this.sseSource.onmessage = () => this.poll()
   }
 
   dispose(): void {
@@ -515,6 +520,8 @@ class AgentBoardWidget {
     this.root.remove()
     this.unsubscribeList?.()
     this.unsubscribeList = null
+    this.sseSource?.close()
+    this.sseSource = null
     if (this.summonEl !== null) {
       this.summonEl.remove()
       this.summonEl = null
