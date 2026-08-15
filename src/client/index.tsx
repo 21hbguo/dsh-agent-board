@@ -151,18 +151,20 @@ const WIDGET_CSS = `
 }
 .swd-id { color: #d7dde3; }
 .swd-id-root { color: #9ad0ff; font-weight: 700; }
-.swd-meta { color: #9aa0a6; margin-left: auto; padding-left: 8px; }
-.swd-stall { color: #f87171; font-weight: 700; margin-left: auto; padding-left: 8px; }
+.swd-meta { color: #9aa0a6; margin-left: auto; padding-left: 8px; flex: none; white-space: nowrap; }
+.swd-stall { color: #f87171; font-weight: 700; margin-left: auto; padding-left: 8px; flex: none; white-space: nowrap; }
 .swd-offline { color: #fbbf24; text-align: center; padding: 4px 0; }
 .swd-empty { color: #9aa0a6; text-align: center; padding: 4px 0; }
-.swd-excerpt {
+/* 答复节选：与状态同行（名字与状态之间），超长省略 */
+.swd-excerpt-inline {
   color: #8b93a1;
   font-size: 10px;
-  line-height: 1.4;
-  padding: 0 0 2px 12px;
-  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  margin-left: 8px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .swd-summon {
   position: fixed;
@@ -318,18 +320,19 @@ function renderNode(
     line.appendChild(tag)
   }
   line.appendChild(idEl)
+  // 答复节选：与状态同一行（名字之后、状态之前），超长省略；有当前动作时
+  // 节选已过时（动作即进展），隐藏。
+  if (row.action === undefined && row.lastReply !== undefined) {
+    const excerptEl = document.createElement('span')
+    excerptEl.className = 'swd-excerpt-inline'
+    excerptEl.textContent = row.lastReply
+    line.appendChild(excerptEl)
+  }
   const meta = document.createElement('span')
   meta.className = stalled ? 'swd-stall' : 'swd-meta'
   meta.textContent = text
   line.appendChild(meta)
   li.appendChild(line)
-  // 有当前动作时节选已过时（动作即进展），隐藏；空闲/停滞时显示最近产出。
-  if (row.action === undefined && row.lastReply !== undefined) {
-    const excerptEl = document.createElement('div')
-    excerptEl.className = 'swd-excerpt'
-    excerptEl.textContent = row.lastReply
-    li.appendChild(excerptEl)
-  }
   if (node.children.length > 0 && opts.collapsed !== true) {
     const ul = document.createElement('ul')
     for (const [i, child] of node.children.entries()) {
