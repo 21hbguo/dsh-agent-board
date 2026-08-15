@@ -128,7 +128,19 @@ const WIDGET_CSS = `
 .swd-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
 .swd-dot-running { background: #4ade80; }
 .swd-dot-idle { background: #6b7280; }
+.swd-dot-root { background: #60a5fa; box-shadow: 0 0 5px rgba(96, 165, 250, 0.8); }
+.swd-tag {
+  color: #0f172a;
+  background: #60a5fa;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 4px;
+  line-height: 1.4;
+  flex: none;
+}
 .swd-id { color: #d7dde3; }
+.swd-id-root { color: #9ad0ff; font-weight: 700; }
 .swd-meta { color: #9aa0a6; margin-left: auto; padding-left: 8px; }
 .swd-stall { color: #f87171; font-weight: 700; margin-left: auto; padding-left: 8px; }
 .swd-offline { color: #fbbf24; text-align: center; padding: 4px 0; }
@@ -177,23 +189,83 @@ interface TreeNode {
   children: TreeNode[]
 }
 
-/** 把平铺快照行组装成层级树（根 = 父不在快照里的行）。 */
-function buildTree(rows: readonly AgentSnapshotRow[]): TreeNode[] {
+/** 把平铺快照行组装成以 rootId（主 agent/当前会话）为根的层级树。 */
+function buildTree(rows: readonly AgentSnapshotRow[], rootId: string): TreeNode {
   const byId = new Map<string, TreeNode>()
   for (const row of rows) byId.set(row.id, { row, children: [] })
-  const roots: TreeNode[] = []
-  for (const node of byId.values()) {
-    const parent = node.row.parentSession === undefined ? undefined : byId.get(node.row.parentSession)
-    if (parent === undefined) roots.push(node)
-    else parent.children.push(node)
+  // 主 agent 节点：不在快照里（快照只含子代理），合成一个根节点。
+  const root: TreeNode = {
+    row: {
+      id: rootId,
+      status: 'idle',
+      depth: 0,
+      parentSession: undefined,
+      lastActivity: Date.now(),
+      silentMs: 0,
+    },
+    children: [],
   }
+  const attach = (parent: TreeNode): void => {
+    for (const node of byId.values()) {
+      if (node.row.parentSession === parent.row.id) {
+        parent.children.push(node)
+        attach(node)
+      }
+    }
+  }
+  attach(root)
   // 子节点按静默时长升序（活跃的在前）。
   const sortNodes = (nodes: TreeNode[]): void => {
     nodes.sort((a, b) => a.row.silentMs - b.row.silentMs)
     for (const n of nodes) sortNodes(n.children)
   }
-  sortNodes(roots)
-  return roots
+  sortNodes(root.children)
+  return root
+}
+
+/** 子树节点总数（含根）。 */
+function countNodes(node: TreeNode): number {
+  return 1 + node.children.reduce((sum, child) => sum + countNodes(child), 0)
+}
+
+/** 子树中 running 的子代理数（根节点为合成 idle，天然不计入）。 */
+function countRunningChildren(node: TreeNode): number {
+  let n = node.row.status === 'running' ? 1 : 0
+  for (const child of node.children) n += countRunningChildren(child)
+  return n
+}
+
+/** 渲染主 agent 根节点（当前会话），点击跳回主会话。 */
+function renderRoot(root: TreeNode, threshold: number, onOpen: (id: string) => void): HTMLLIElement {
+  const li = document.createElement('li')
+  const line = document.createElement('div')
+  line.className = 'swd-node'
+  line.title = `主 agent（当前会话）· 点击回到会话 ${root.row.id}`
+  line.addEventListener('click', (e) => {
+    e.stopPropagation()
+    onOpen(root.row.id)
+  })
+  const dot = document.createElement('span')
+  dot.className = 'swd-dot swd-dot-root'
+  const tag = document.createElement('span')
+  tag.className = 'swd-tag'
+  tag.textContent = '主'
+  const idEl = document.createElement('span')
+  idEl.className = 'swd-id swd-id-root'
+  idEl.textContent = root.row.id.slice(0, 8)
+  idEl.title = root.row.id
+  const count = countNodes(root) - 1
+  const meta = document.createElement('span')
+  meta.className = 'swd-meta'
+  meta.textContent = count > 0 ? `子代理 ${count}` : '无子代理'
+  line.append(dot, tag, idEl, meta)
+  li.appendChild(line)
+  if (root.children.length > 0) {
+    const ul = document.createElement('ul')
+    for (const child of root.children) ul.appendChild(renderNode(child, threshold, onOpen))
+    li.appendChild(ul)
+  }
+  return li
 }
 
 /** 渲染一个树节点（递归），返回 DOM 元素。点击节点跳转到对应会话。 */
@@ -269,6 +341,8 @@ class WatchdogWidget {
   private dragStartRight = 0
   private summonEl: HTMLButtonElement | null = null
   private visibilityCleanup: (() => void) | null = null
+  /** 树根 = 主 agent 会话（首次读到当前会话时锁定，跳转子代理不漂移）。 */
+  private rootId: string | undefined
 
   constructor(ctx: ClientContext) {
     this.ctx = ctx
@@ -466,20 +540,25 @@ class WatchdogWidget {
 
   private render(snapshot: WatchdogSnapshot): void {
     this.offlineEl.style.display = 'none'
-    const rows = snapshot.rows
-    const running = rows.filter(r => r.status === 'running').length
-    this.titleTextEl.textContent = rows.length === 0 ? '子代理' : `子代理 ${running}/${rows.length}`
+    // 锁定主 agent 根：首次读到当前会话即固定，之后点击子代理跳转不换根。
+    if (this.rootId === undefined) {
+      this.rootId = this.ctx.sessions.list.getSnapshot().current
+    }
+    const rootId = this.rootId
     this.treeEl.replaceChildren()
-    if (rows.length === 0) {
+    if (rootId === undefined) {
       const empty = document.createElement('div')
       empty.className = 'swd-empty'
-      empty.textContent = '无活跃子代理'
+      empty.textContent = '无当前会话'
       this.treeEl.appendChild(empty)
+      this.titleTextEl.textContent = '子代理'
       return
     }
-    for (const root of buildTree(rows)) {
-      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id)))
-    }
+    const root = buildTree(snapshot.rows, rootId)
+    const total = countNodes(root) - 1
+    const runningCount = countRunningChildren(root)
+    this.titleTextEl.textContent = total === 0 ? '子代理' : `子代理 ${runningCount}/${total}`
+    this.treeEl.appendChild(renderRoot(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id)))
   }
 }
 
