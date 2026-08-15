@@ -1,11 +1,12 @@
 /**
- * @dsh-external/dsh-subagent-watchdog — 浏览器半区：常驻子代理监控悬浮窗。
+ * @dsh-external/dsh-subagent-watchdog — 浏览器半区：常驻 Agent 看板。
  *
  * A persistent always-on-top floating window (top-right by default) that
- * renders the live subagent tree — parent → children by session lineage —
- * with per-node status (running / idle / stalled highlight), silent duration,
- * and last activity. Polls `GET /api/subagent-watchdog/agents` every
- * {@link POLL_MS}; the poll pauses while the tab is hidden.
+ * renders the live agent tree — the current session as root, its subagents
+ * branching down — with per-node status (running / idle / stalled highlight),
+ * silent duration, latest reply excerpt, and last activity. Polls
+ * `GET /api/subagent-watchdog/agents` every {@link POLL_MS}; the poll pauses
+ * while the tab is hidden.
  *
  * Interactions (same pattern as dsh-sysmon's widget): drag the title bar to
  * move (position persisted to localStorage), click the title to collapse to a
@@ -266,7 +267,7 @@ function renderRoot(root: TreeNode, threshold: number, onOpen: (id: string) => v
   const count = countNodes(root) - 1
   const meta = document.createElement('span')
   meta.className = 'swd-meta'
-  meta.textContent = count > 0 ? `子代理 ${count}` : '无子代理'
+  meta.textContent = count > 0 ? `Agent × ${count}` : '无 Agent'
   line.append(dot, tag, idEl, meta)
   li.appendChild(line)
   if (root.children.length > 0) {
@@ -371,7 +372,7 @@ class WatchdogWidget {
 
     this.titleTextEl = document.createElement('span')
     this.titleTextEl.className = 'swd-title-left'
-    this.titleTextEl.textContent = '子代理'
+    this.titleTextEl.textContent = 'Agent 看板'
 
     const closeBtn = document.createElement('span')
     closeBtn.className = 'swd-close'
@@ -384,7 +385,7 @@ class WatchdogWidget {
 
     this.titleBarEl = document.createElement('div')
     this.titleBarEl.className = 'swd-title'
-    this.titleBarEl.title = '子代理层级监控（拖动移动 · 点击折叠/展开）'
+    this.titleBarEl.title = 'Agent 看板（拖动移动 · 点击折叠/展开）'
     this.titleBarEl.appendChild(this.titleTextEl)
     this.titleBarEl.appendChild(closeBtn)
     this.titleBarEl.addEventListener('pointerdown', (e) => this.beginDrag(e))
@@ -474,7 +475,7 @@ class WatchdogWidget {
     if (this.summonEl !== null) return
     const btn = document.createElement('button')
     btn.className = 'swd-summon'
-    btn.textContent = '◉ 子代理'
+    btn.textContent = '◉ Agent 看板'
     btn.addEventListener('click', () => this.show())
     document.body.appendChild(btn)
     this.summonEl = btn
@@ -550,7 +551,7 @@ class WatchdogWidget {
       .catch(() => {
         this.offlineEl.style.display = 'block'
         this.treeEl.replaceChildren()
-        this.titleTextEl.textContent = '子代理（离线）'
+        this.titleTextEl.textContent = 'Agent 看板（离线）'
       })
       .finally(() => { this.fetching = false })
   }
@@ -568,13 +569,13 @@ class WatchdogWidget {
       empty.className = 'swd-empty'
       empty.textContent = '无当前会话'
       this.treeEl.appendChild(empty)
-      this.titleTextEl.textContent = '子代理'
+      this.titleTextEl.textContent = 'Agent 看板'
       return
     }
     const root = buildTree(snapshot.rows, rootId)
     const total = countNodes(root) - 1
     const runningCount = countRunningChildren(root)
-    this.titleTextEl.textContent = total === 0 ? '子代理' : `子代理 ${runningCount}/${total}`
+    this.titleTextEl.textContent = total === 0 ? 'Agent 看板' : `Agent ${runningCount}/${total}`
     this.treeEl.appendChild(renderRoot(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id)))
   }
 }
@@ -599,12 +600,12 @@ function WatchdogAction(props: { wide: boolean }) {
   return (
     <button
       className="swd-action"
-      title="子代理监控"
+      title="Agent 看板"
       style={active ? { color: '#9ad0ff' } : undefined}
       onClick={() => document.dispatchEvent(new Event(TOGGLE_EVENT))}
     >
       <span>◉</span>
-      {props.wide && <span>子代理</span>}
+      {props.wide && <span>Agent 看板</span>}
     </button>
   )
 }
