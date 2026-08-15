@@ -21,13 +21,19 @@
  *
  * 阈值可用环境变量覆盖（便于测试与按任务调优）：
  *   DSH_WATCHDOG_SCAN_MS / DSH_WATCHDOG_STALL_MS / DSH_WATCHDOG_REMIND_MS
+ *
+ * 另注册 `GET /api/subagent-watchdog/agents` JSON 快照端点，供浏览器半区
+ * （侧边栏「子代理监控」面板）轮询展示：每个子代理的状态、最后活动时间、
+ * 静默时长（与阈值对比高亮）。
  */
 import type { Context } from 'cordis'
 import Schema from 'schemastery'
+import type {} from '@deepseek-ai/dsh-host-webserver'
 import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { makeWatchdogRoutes } from './routes.js'
 
 export const name = '@dsh-external/dsh-subagent-watchdog'
-export const inject = ['agents'] as const
+export const inject = ['agents', 'webServer'] as const
 
 /** 配置：扫描周期 / 停滞阈值 / 重复提醒节流（毫秒）。 */
 export interface Config {
@@ -44,12 +50,33 @@ export const Config: Schema<Config> = Schema.object({
 
 // ---------------------------------------------------------------- 结构面
 
+/** 快照里一行子代理状态（浏览器面板渲染用）。 */
+export interface AgentSnapshotRow {
+  readonly id: string
+  readonly status: 'idle' | 'running'
+  /** 委派深度（0 = 顶层会话，子代理 ≥ 1）。 */
+  readonly depth: number
+  readonly parentSession?: string
+  /** 最后一条 session 事件时间（Unix ms），无事件时回退到会话创建时间。 */
+  readonly lastActivity: number
+  /** 距最后活动的毫秒数。 */
+  readonly silentMs: number
+}
+
+/** 一次快照的完整载荷。 */
+export interface WatchdogSnapshot {
+  readonly now: number
+  readonly stallThresholdMs: number
+  readonly rows: readonly AgentSnapshotRow[]
+}
+
 /** SessionHeader 最小结构面（@deepseek-ai/dsh-session 的 SessionHeader）。 */
 interface SessionHeaderLike {
   readonly id: string
   readonly createdAt: number
   readonly parentSession?: string
   readonly origin?: 'subagent'
+  readonly delegationDepth?: number
 }
 
 /** SessionEvent 最小结构面（每个事件自带 Unix 毫秒时间戳）。 */
@@ -191,6 +218,34 @@ export function apply(ctx: Context, config: Config): void {
     const timer = setInterval(scan, scanIntervalMs)
     return () => clearInterval(timer)
   }, 'watchdog.scan')
+
+  // JSON 快照：浏览器半区的「子代理监控」面板轮询此端点。
+  const snapshot = (): WatchdogSnapshot => {
+    const now = Date.now()
+    const rows: AgentSnapshotRow[] = []
+    for (const agent of ctx.agents.list()) {
+      if (agent.session.header.origin !== 'subagent') continue
+      const events = agent.session.events
+      const last = lastActivity.get(agent.id)
+        ?? events.at(-1)?.time
+        ?? agent.session.header.createdAt
+      rows.push({
+        id: agent.id,
+        status: agent.status,
+        depth: agent.session.header.delegationDepth ?? 0,
+        parentSession: agent.session.header.parentSession,
+        lastActivity: last,
+        silentMs: now - last,
+      })
+    }
+    rows.sort((a, b) => a.depth - b.depth || a.silentMs - b.silentMs)
+    return { now, stallThresholdMs, rows }
+  }
+
+  ctx.effect(() => {
+    const disposers = makeWatchdogRoutes({ snapshot }).map(route => ctx.webServer.register(route))
+    return () => { for (const dispose of disposers) dispose() }
+  }, 'watchdog: routes')
 
   ctx.logger.info(
     `[watchdog] armed: stall=%dms scan=%dms remind=%dms`,

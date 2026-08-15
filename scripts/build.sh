@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build dsh-subagent-watchdog: compile src/ → lib/ with the dsh checkout's tsc.
+# Build dsh-subagent-watchdog: compile src/ → lib/ with the dsh checkout's tsc,
+# then bundle the browser half with tsdown (lib/client.js).
 # Requires DSH_CHECKOUT pointing at a dsh source checkout (auto-probe below).
 set -euo pipefail
 
@@ -47,10 +48,43 @@ link_pkg cordis vendor/cordis
 link_pkg schemastery vendor/schemastery
 link_pkg @deepseek-ai/schemastery vendor/schemastery
 link_pkg @deepseek-ai/dsh-llm packages/llm/llm
+link_pkg @deepseek-ai/dsh-host-webserver packages/host/webserver
+link_pkg @deepseek-ai/dsh-client-runtime packages/client/runtime
+link_pkg @deepseek-ai/dsh-client-ui-slots packages/client/ui-slots
+link_pkg @deepseek-ai/dsh-client-ui-sidebar packages/client/ui-sidebar
 # @types/node（编译类型；checkout 自带）
 link_pkg @types/node node_modules/@types/node
 
+# react + @types/react（client TSX 编译类型；react 运行时由 web 宿主提供）
+REACT_SRC=$(find "$CHECKOUT/node_modules/.pnpm" -maxdepth 1 -type d -iname 'react@*' 2>/dev/null | head -1)
+if [ -n "$REACT_SRC" ]; then
+  node -e "
+    const fs = require('fs');
+    const path = require('path');
+    fs.rmSync('node_modules/react', { recursive: true, force: true });
+    fs.symlinkSync(path.resolve(process.argv[1]), path.resolve('node_modules/react'), process.platform === 'win32' ? 'junction' : 'dir');
+  " "$REACT_SRC/node_modules/react"
+fi
+REACT_TYPES=$(find "$CHECKOUT/node_modules/.pnpm" -maxdepth 1 -type d -iname '@types+react@*' 2>/dev/null | head -1)
+if [ -n "$REACT_TYPES" ]; then
+  node -e "
+    const fs = require('fs');
+    const path = require('path');
+    fs.rmSync('node_modules/@types/react', { recursive: true, force: true });
+    fs.symlinkSync(path.resolve(process.argv[1]), path.resolve('node_modules/@types/react'), process.platform === 'win32' ? 'junction' : 'dir');
+  " "$REACT_TYPES/node_modules/@types/react"
+fi
+
 echo "=== Compiling src → lib ==="
 "$TSC" -p tsconfig.json
+
+echo "=== Bundling client (tsdown) ==="
+if [ -x "$CHECKOUT/node_modules/.bin/tsdown" ] || [ -f "$CHECKOUT/node_modules/.bin/tsdown.cmd" ]; then
+  "$CHECKOUT/node_modules/.bin/tsdown"
+elif [ -x node_modules/.bin/tsdown ]; then
+  node_modules/.bin/tsdown
+else
+  echo "build: tsdown not found (skip client bundle)" >&2
+fi
 
 echo "=== Build complete ==="

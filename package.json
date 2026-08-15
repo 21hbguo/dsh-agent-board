@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-subagent-watchdog",
   "version": "0.1.0",
-  "description": "子代理停滞检测器：后台 subagent 静默超过阈值时，自动往父会话注入 notice 提醒（催/中断/继续等），无需老板轮询",
+  "description": "子代理停滞检测器：后台 subagent 静默超过阈值时，自动往父会话注入 notice 提醒（催/中断/继续等），侧边栏面板实时展示各子代理状态",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",
@@ -15,19 +15,40 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json"
   },
   "license": "BSD-3-Clause",
   "peerDependencies": {
     "cordis": ">=4.0.0-rc <5",
-    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2"
+    "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-host-webserver": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-client-runtime": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-client-ui-sidebar": ">=0.0.1-rc <2",
+    "react": "^18.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.0",
+    "@types/react": "^18.3.0",
+    "tsdown": "^0.22.14",
     "typescript": "^5.9.0"
   },
   "scripts": {
     "build": "bash scripts/build.sh",
+    "build:client": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
   }
 }
