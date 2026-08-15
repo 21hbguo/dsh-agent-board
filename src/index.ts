@@ -33,7 +33,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { makeWatchdogRoutes } from './routes.js'
 
 export const name = '@dsh-external/dsh-subagent-watchdog'
-export const inject = ['agents', 'webServer'] as const
+export const inject = ['agents', 'webServer', 'subagents'] as const
 
 /** 配置：扫描周期 / 停滞阈值 / 重复提醒节流（毫秒）。 */
 export interface Config {
@@ -70,6 +70,8 @@ export interface AgentSnapshotRow {
   readonly lastReply?: string
   /** 当前动作：正在执行的工具 / 正在流式输出。 */
   readonly action?: AgentAction
+  /** 创建时的名字（descriptor label，懒解析；无则缺省）。 */
+  readonly label?: string
 }
 
 /** 一次快照的完整载荷。 */
@@ -126,6 +128,14 @@ interface AgentRegistryLike {
   list(): AgentLike[]
 }
 
+/** ctx.subagents 服务面（只取 label 解析用到的面）。 */
+interface SubagentsLike {
+  listChildren(
+    parentSessionId: string,
+    signal?: AbortSignal,
+  ): Promise<readonly { readonly kind: string; readonly id: string; readonly label?: string }[]>
+}
+
 /** subagent/end 事件的 run info 最小结构面。 */
 interface SubagentEndInfoLike {
   readonly id: string
@@ -134,6 +144,7 @@ interface SubagentEndInfoLike {
 declare module 'cordis' {
   interface Context {
     readonly agents: AgentRegistryLike
+    readonly subagents: SubagentsLike
   }
   interface Events {
     'session/event'(session: SessionLike, event: SessionEventLike): void
@@ -209,12 +220,35 @@ export function apply(ctx: Context, config: Config): void {
   const lastReply = new Map<string, string>()
   /** 会话 id → 当前动作（正在执行的工具 / 正在输出）。 */
   const lastAction = new Map<string, AgentAction>()
+  /** 子代理 id → 创建时的名字（descriptor label，懒查询缓存）。 */
+  const labelCache = new Map<string, string>()
+  /** 正在查询 label 的子代理 id（去重）。 */
+  const labelPending = new Set<string>()
+
+  /** 懒解析子代理创建名：对父会话调 listChildren 一次拿全部直接子。 */
+  const ensureLabel = (id: string, parentSession: string | undefined): void => {
+    if (parentSession === undefined) return
+    if (labelCache.has(id) || labelPending.has(id)) return
+    labelPending.add(id)
+    void ctx.subagents.listChildren(parentSession, AbortSignal.timeout(3_000))
+      .then(entries => {
+        for (const entry of entries) {
+          if (entry.label !== undefined && entry.label !== '') labelCache.set(entry.id, entry.label)
+        }
+      })
+      .catch(error => {
+        ctx.logger.warn(`[watchdog] label 解析失败 ${id}: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      .finally(() => { labelPending.delete(id) })
+  }
 
   const forget = (id: string): void => {
     lastActivity.delete(id)
     lastRemind.delete(id)
     lastReply.delete(id)
     lastAction.delete(id)
+    labelCache.delete(id)
+    labelPending.delete(id)
   }
 
   // 活动记账：所有会话的每个 session 事件（turn/start、tool/start、
@@ -317,6 +351,7 @@ export function apply(ctx: Context, config: Config): void {
       const last = lastActivity.get(agent.id)
         ?? events.at(-1)?.time
         ?? header.createdAt
+      const label = header.origin === 'subagent' ? labelCache.get(agent.id) : undefined
       const row: AgentSnapshotRow = {
         id: agent.id,
         status: agent.status,
@@ -326,9 +361,14 @@ export function apply(ctx: Context, config: Config): void {
         silentMs: now - last,
         ...(lastReply.has(agent.id) ? { lastReply: excerpt(lastReply.get(agent.id)!) } : {}),
         ...(lastAction.has(agent.id) ? { action: lastAction.get(agent.id) } : {}),
+        ...(label !== undefined ? { label } : {}),
       }
-      if (header.origin === 'subagent') rows.push(row)
-      else roots.push(row)
+      if (header.origin === 'subagent') {
+        if (label === undefined) ensureLabel(agent.id, header.parentSession)
+        rows.push(row)
+      } else {
+        roots.push(row)
+      }
     }
     roots.sort((a, b) => b.lastActivity - a.lastActivity)
     rows.sort((a, b) => a.depth - b.depth || a.silentMs - b.silentMs)

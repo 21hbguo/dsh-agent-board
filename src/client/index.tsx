@@ -246,12 +246,13 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
   return { text: '空闲', stalled: false }
 }
 
-/** 渲染一个树节点（递归）。根节点（顶层会话）蓝色点，当前会话加「当前」标记。 */
+/** 渲染一个树节点（递归）。根节点（顶层会话）蓝色点，当前会话加「当前」标记；
+ *  子代理节点显示「子代理<兄弟序号>-<创建名>」。 */
 function renderNode(
   node: TreeNode,
   threshold: number,
   onOpen: (id: string) => void,
-  opts: { isRoot?: boolean; isCurrent?: boolean } = {},
+  opts: { isRoot?: boolean; isCurrent?: boolean; idx?: number } = {},
 ): HTMLLIElement {
   const { row } = node
   const li = document.createElement('li')
@@ -270,7 +271,9 @@ function renderNode(
     : `swd-dot ${row.status === 'running' ? 'swd-dot-running' : 'swd-dot-idle'}`
   const idEl = document.createElement('span')
   idEl.className = opts.isRoot === true ? 'swd-id swd-id-root' : 'swd-id'
-  idEl.textContent = row.id.slice(0, 8)
+  idEl.textContent = opts.isRoot === true || row.label === undefined
+    ? row.id.slice(0, 8)
+    : `子代理${opts.idx ?? '?'}-${row.label.slice(0, 24)}`
   idEl.title = row.id
   line.appendChild(dot)
   if (opts.isCurrent === true) {
@@ -295,7 +298,9 @@ function renderNode(
   }
   if (node.children.length > 0) {
     const ul = document.createElement('ul')
-    for (const child of node.children) ul.appendChild(renderNode(child, threshold, onOpen))
+    for (const [i, child] of node.children.entries()) {
+      ul.appendChild(renderNode(child, threshold, onOpen, { idx: i + 1 }))
+    }
     li.appendChild(ul)
   }
   return li
