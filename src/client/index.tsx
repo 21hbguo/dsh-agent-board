@@ -269,7 +269,7 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
 function renderNode(
   node: TreeNode,
   threshold: number,
-  onOpen: (id: string) => void,
+  onOpen: (id: string, parentId?: string) => void,
   opts: { isRoot?: boolean; isCurrent?: boolean; idx?: number; collapsed?: boolean; onToggle?: () => void } = {},
 ): HTMLLIElement {
   const { row } = node
@@ -281,7 +281,7 @@ function renderNode(
     : `点击打开会话 ${row.id}`
   line.addEventListener('click', (e) => {
     e.stopPropagation()
-    onOpen(row.id)
+    onOpen(row.id, row.parentSession)
   })
   const { text, stalled } = statusText(row, threshold)
   const stClass = stalled ? 'swd-st-stall'
@@ -343,14 +343,56 @@ function renderNode(
   return li
 }
 
-/** 跳转到子代理的会话（优先走 catalog 子代理地址，否则普通 open）。 */
-function openSession(ctx: ClientContext, id: string): void {
-  const addr = ctx.sessions.subagentAddress(id)
-  if (addr !== undefined) {
-    ctx.sessions.openSubagent(addr)
-    return
+/** 从 host 投影查子代理的 mode（continuable/one-shot），用于构造导航地址。 */
+async function findChildMode(parentId: string, childId: string): Promise<'continuable' | 'one-shot' | undefined> {
+  try {
+    const res = await fetch('/api/subagent.list', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: crypto.randomUUID(),
+        method: 'subagent.list',
+        payload: { parentSessionId: parentId },
+      }),
+    })
+    if (!res.ok) return undefined
+    const full = await res.json() as {
+      result?: { ok?: boolean; value?: { entries?: readonly { id: string; kind?: string; mode?: string }[] } }
+    }
+    const entry = full.result?.ok === true
+      ? full.result.value?.entries?.find(e => e.id === childId)
+      : undefined
+    if (entry?.kind === 'child' && (entry.mode === 'continuable' || entry.mode === 'one-shot')) {
+      return entry.mode
+    }
+  } catch { /* 查询失败继续兜底 */ }
+  return undefined
+}
+
+/** 跳转到子代理的会话。分层兜底（finished 存档的子代理不在导航地址/列表中）：
+ *  ① 已有 catalog 地址 → openSubagent；② 刷新父 catalog + host 投影构造地址；
+ *  ③ 普通 open。 */
+async function openSession(ctx: ClientContext, id: string, parentId: string | undefined): Promise<void> {
+  const tryAddress = (address: { parentSessionId: string; childSessionId: string; mode: 'continuable' | 'one-shot' }): boolean => {
+    try {
+      ctx.sessions.openSubagent(address)
+      return true
+    } catch { return false }
   }
-  ctx.sessions.open(id)
+  // ① 已有导航地址
+  const known = ctx.sessions.subagentAddress(id)
+  if (known !== undefined && tryAddress(known)) return
+  // ② 刷新父 catalog（host 持久化投影含已 settle 子代理），构造地址再试
+  if (parentId !== undefined) {
+    try { await ctx.sessions.refreshSubagents(parentId) } catch { /* 刷新失败继续 */ }
+    const mode = await findChildMode(parentId, id)
+    if (mode !== undefined && tryAddress({ parentSessionId: parentId, childSessionId: id, mode })) return
+  }
+  // ③ 普通 open（顶层会话；子代理会话不在列表时可能抛错，静默）
+  try {
+    ctx.sessions.open(id)
+  } catch { /* unknown session：静默，避免打断看板 */ }
 }
 
 /** 常驻悬浮窗：树形展示子代理层级 + 状态。 */
@@ -628,7 +670,7 @@ class AgentBoardWidget {
       const defaultCollapsed = root.row.status === 'idle'
       const collapsed = this.collapsedRoots.has(root.row.id)
         || (defaultCollapsed && !this.expandedRoots.has(root.row.id))
-      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, id => this.openSession(id), {
+      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, (id, parentId) => this.openSession(id, parentId), {
         isRoot: true,
         isCurrent: root.row.id === currentId,
         collapsed,
@@ -647,9 +689,9 @@ class AgentBoardWidget {
   }
 
   /** 点击节点跳转会话，并标记为已点开（完成项 → 空闲计时）。 */
-  private openSession(id: string): void {
+  private openSession(id: string, parentId?: string): void {
     this.visitedSessions.add(id)
-    openSession(this.ctx, id)
+    void openSession(this.ctx, id, parentId)
   }
 }
 
