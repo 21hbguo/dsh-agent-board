@@ -121,7 +121,10 @@ const WIDGET_CSS = `
   gap: 5px;
   padding: 1.5px 0;
   white-space: nowrap;
+  cursor: pointer;
+  border-radius: 4px;
 }
+.swd-node:hover { background: rgba(154, 208, 255, 0.12); }
 .swd-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
 .swd-dot-running { background: #4ade80; }
 .swd-dot-idle { background: #6b7280; }
@@ -193,12 +196,17 @@ function buildTree(rows: readonly AgentSnapshotRow[]): TreeNode[] {
   return roots
 }
 
-/** 渲染一个树节点（递归），返回 DOM 元素。 */
-function renderNode(node: TreeNode, threshold: number): HTMLLIElement {
+/** 渲染一个树节点（递归），返回 DOM 元素。点击节点跳转到对应会话。 */
+function renderNode(node: TreeNode, threshold: number, onOpen: (id: string) => void): HTMLLIElement {
   const { row } = node
   const li = document.createElement('li')
   const line = document.createElement('div')
   line.className = 'swd-node'
+  line.title = `点击打开会话 ${row.id}`
+  line.addEventListener('click', (e) => {
+    e.stopPropagation()
+    onOpen(row.id)
+  })
   const dot = document.createElement('span')
   dot.className = `swd-dot ${row.status === 'running' ? 'swd-dot-running' : 'swd-dot-idle'}`
   const idEl = document.createElement('span')
@@ -223,14 +231,25 @@ function renderNode(node: TreeNode, threshold: number): HTMLLIElement {
   li.appendChild(line)
   if (node.children.length > 0) {
     const ul = document.createElement('ul')
-    for (const child of node.children) ul.appendChild(renderNode(child, threshold))
+    for (const child of node.children) ul.appendChild(renderNode(child, threshold, onOpen))
     li.appendChild(ul)
   }
   return li
 }
 
+/** 跳转到子代理的会话（优先走 catalog 子代理地址，否则普通 open）。 */
+function openSession(ctx: ClientContext, id: string): void {
+  const addr = ctx.sessions.subagentAddress(id)
+  if (addr !== undefined) {
+    ctx.sessions.openSubagent(addr)
+    return
+  }
+  ctx.sessions.open(id)
+}
+
 /** 常驻悬浮窗：树形展示子代理层级 + 状态。 */
 class WatchdogWidget {
+  private readonly ctx: ClientContext
   private readonly state: WidgetState
   private readonly root: HTMLDivElement
   private readonly titleBarEl: HTMLDivElement
@@ -251,7 +270,8 @@ class WatchdogWidget {
   private summonEl: HTMLButtonElement | null = null
   private visibilityCleanup: (() => void) | null = null
 
-  constructor() {
+  constructor(ctx: ClientContext) {
+    this.ctx = ctx
     this.state = loadState()
     this.root = document.createElement('div')
     this.root.className = 'swd-widget'
@@ -458,7 +478,7 @@ class WatchdogWidget {
       return
     }
     for (const root of buildTree(rows)) {
-      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs))
+      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id)))
     }
   }
 }
@@ -498,7 +518,7 @@ function WatchdogAction(props: { wide: boolean }) {
  * footer action.
  * @param ctx - client root context (slots + cordis base).
  */
-export const inject = ['slots'] as const
+export const inject = ['slots', 'sessions'] as const
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.slots.register({
@@ -508,7 +528,7 @@ export function apply(ctx: ClientContext): void {
     inject: () => ({}),
   }, WatchdogAction), 'watchdog: footer action')
   ctx.effect(() => {
-    const widget = new WatchdogWidget()
+    const widget = new WatchdogWidget(ctx)
     widget.mount()
     return () => widget.dispose()
   }, 'watchdog: floating window')
