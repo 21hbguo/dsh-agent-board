@@ -131,6 +131,7 @@ const WIDGET_CSS = `
 .swd-st-running { background: #4ade80; border-color: #4ade80; }
 .swd-st-idle { background: #6b7280; border-color: #6b7280; }
 .swd-st-stall { background: #f87171; border-color: #f87171; }
+.swd-st-finished { background: #60a5fa; border-color: #60a5fa; }
 /* 主 agent：实心圆（状态色填充） */
 .swd-dot-root { border: 1.5px solid; box-shadow: 0 0 5px rgba(255, 255, 255, 0.25); }
 /* 子代理：空心圆（边框 = 状态色） */
@@ -195,6 +196,9 @@ const WIDGET_CSS = `
 /** 根筛选窗口：最近活跃（working 或刚结束）的顶层会话才显示，更老的隐藏。 */
 const ROOT_ACTIVE_WINDOW_MS = 30 * 60_000
 
+/** 空闲保留期：用户点进去看过（visited）的完成项转为空闲，超过此期限自动消失。 */
+const IDLE_RETENTION_MS = 30 * 60_000
+
 /** 人类可读的时长。 */
 function formatDuration(ms: number): string {
   const totalMin = Math.floor(ms / 60_000)
@@ -242,13 +246,14 @@ function countRunning(forest: TreeNode[]): number {
   return forest.reduce((sum, node) => sum + (node.row.status === 'running' ? 1 : 0) + node.children.reduce((s, c) => s + countRunning([c]), 0), 0)
 }
 
-/** 节点状态文本（动作优先：工具执行 / 流式输出 > 停滞 > 处理中 > 空闲）。 */
+/** 节点状态文本（动作优先：工具执行 / 流式输出 > 停滞 > 完成 > 处理中 > 空闲）。 */
 function statusText(row: AgentSnapshotRow, threshold: number): { text: string; stalled: boolean } {
   if (row.action !== undefined) {
     return row.action.kind === 'tool'
       ? { text: `⚙ ${row.action.text}`, stalled: false }
       : { text: '✍ 输出中…', stalled: false }
   }
+  if (row.status === 'finished') return { text: '完成', stalled: false }
   if (row.status === 'running') {
     if (row.silentMs > threshold) return { text: `停滞 ${formatDuration(row.silentMs)}`, stalled: true }
     return { text: '处理中…', stalled: false }
@@ -276,7 +281,10 @@ function renderNode(
     onOpen(row.id)
   })
   const { text, stalled } = statusText(row, threshold)
-  const stClass = stalled ? 'swd-st-stall' : row.status === 'running' ? 'swd-st-running' : 'swd-st-idle'
+  const stClass = stalled ? 'swd-st-stall'
+    : row.status === 'finished' ? 'swd-st-finished'
+    : row.status === 'running' ? 'swd-st-running'
+    : 'swd-st-idle'
   const dot = document.createElement('span')
   dot.className = `swd-dot ${stClass} ${opts.isRoot === true ? 'swd-dot-root' : 'swd-dot-ring'}`
   const idEl = document.createElement('span')
@@ -369,6 +377,8 @@ class WatchdogWidget {
   private readonly collapsedRoots = new Set<string>()
   /** 用户手动展开的根（覆盖 idle 默认折叠）。 */
   private readonly expandedRoots = new Set<string>()
+  /** 用户点进去看过（visited）的会话：完成项点开后转空闲，超时消失。 */
+  private readonly visitedSessions = new Set<string>()
   private unsubscribeList: (() => void) | null = null
 
   constructor(ctx: ClientContext) {
@@ -424,8 +434,11 @@ class WatchdogWidget {
     this.root.appendChild(this.titleBarEl)
     this.root.appendChild(this.bodyEl)
 
-    // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期。
+    // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期；
+    // 当前会话视为「已点开看过」——完成的子代理从此进入空闲计时。
     this.unsubscribeList = this.ctx.sessions.list.subscribe(() => {
+      const current = this.ctx.sessions.list.getSnapshot().current
+      if (current !== undefined) this.visitedSessions.add(current)
       if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
     })
 
@@ -578,15 +591,22 @@ class WatchdogWidget {
   private render(snapshot: WatchdogSnapshot): void {
     this.offlineEl.style.display = 'none'
     const currentId = this.ctx.sessions.list.getSnapshot().current
+    if (currentId !== undefined) this.visitedSessions.add(currentId)
     const now = snapshot.now
+    // 完成项：点进去看过 → 转空闲；空闲超过保留期 → 从看板消失。
+    const keptRows = snapshot.rows.filter(row => !(
+      row.status === 'finished'
+      && this.visitedSessions.has(row.id)
+      && now - row.lastActivity > IDLE_RETENTION_MS
+    ))
     // 根筛选：当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
     // 其余历史会话不显示（避免整屏都是 idle 树）。
     const keptRoots = snapshot.roots.filter(root => (
       root.id === currentId
       || now - root.lastActivity < ROOT_ACTIVE_WINDOW_MS
-      || snapshot.rows.some(row => row.parentSession === root.id)
+      || keptRows.some(row => row.parentSession === root.id)
     ))
-    const forest = buildForest(keptRoots, snapshot.rows)
+    const forest = buildForest(keptRoots, keptRows)
     this.treeEl.replaceChildren()
     if (forest.length === 0) {
       const empty = document.createElement('div')
@@ -604,7 +624,7 @@ class WatchdogWidget {
       const defaultCollapsed = root.row.status === 'idle'
       const collapsed = this.collapsedRoots.has(root.row.id)
         || (defaultCollapsed && !this.expandedRoots.has(root.row.id))
-      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, id => openSession(this.ctx, id), {
+      this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, id => this.openSession(id), {
         isRoot: true,
         isCurrent: root.row.id === currentId,
         collapsed,
@@ -620,6 +640,12 @@ class WatchdogWidget {
         },
       }))
     }
+  }
+
+  /** 点击节点跳转会话，并标记为已点开（完成项 → 空闲计时）。 */
+  private openSession(id: string): void {
+    this.visitedSessions.add(id)
+    openSession(this.ctx, id)
   }
 }
 

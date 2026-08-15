@@ -55,10 +55,12 @@ export type AgentAction =
   | { readonly kind: 'tool'; readonly text: string }
   | { readonly kind: 'streaming' }
 
-/** 快照里一行 agent 状态（浏览器面板渲染用）。 */
+/** 快照里一行 agent 状态（浏览器面板渲染用）。
+ *  `running` = working（在跑）；`idle` = live 但空闲；`finished` = 已 settle
+ *  的存档行（完成态，用户点进去看过后由浏览器转为空闲并超时消失）。 */
 export interface AgentSnapshotRow {
   readonly id: string
-  readonly status: 'idle' | 'running'
+  readonly status: 'idle' | 'running' | 'finished'
   /** 委派深度（0 = 顶层会话，子代理 ≥ 1）。 */
   readonly depth: number
   readonly parentSession?: string
@@ -295,11 +297,45 @@ export function apply(ctx: Context, config: Config): void {
     }
   })
 
-  // 结束/销毁即清账，避免对已完成的子代理继续提醒。
-  ctx.on('subagent/end', info => forget(info.id))
+  /** 已 settle 的子代理存档（完成态，供看板保留「点进去之前」的记录）。 */
+  const settledArchive = new Map<string, AgentSnapshotRow & { readonly endedAt: number }>()
+  /** 存档保留时长：超过后从快照移除（防内存增长）。 */
+  const ARCHIVE_KEEP_MS = 4 * 60 * 60_000
+
+  /** 子代理 settle 时把最终信息存档（status=finished），不随 agent dispose 丢失。
+   *  幂等：已存档则跳过。subagent/end 与 agent/disposed 谁先到谁存档。 */
+  const archiveSettled = (agent: AgentLike): void => {
+    if (settledArchive.has(agent.id)) return
+    if (agent.session.header.origin !== 'subagent') return
+    const header = agent.session.header
+    const endedAt = Date.now()
+    const last = lastActivity.get(agent.id) ?? endedAt
+    settledArchive.set(agent.id, {
+      id: agent.id,
+      status: 'finished',
+      depth: header.delegationDepth ?? 0,
+      parentSession: header.parentSession,
+      lastActivity: last,
+      silentMs: 0,
+      ...(lastReply.has(agent.id) ? { lastReply: excerpt(lastReply.get(agent.id)!) } : {}),
+      ...(labelCache.get(agent.id) !== undefined ? { label: labelCache.get(agent.id)! } : {}),
+      ...(titleCache.get(agent.id) !== undefined ? { title: titleCache.get(agent.id)! } : {}),
+      endedAt,
+    })
+  }
+
+  // 结束/销毁即清账：先存档（读各记账 Map），再清理。
+  ctx.on('subagent/end', info => {
+    const agent = ctx.agents.get(info.id)
+    if (agent !== undefined) archiveSettled(agent)
+    forget(info.id)
+  })
   ctx.on('session/disposed', session => forget(session.id))
   ctx.on('agent/disposed', ({ agent }) => {
-    if (agent.session.header.origin === 'subagent') forget(agent.id)
+    if (agent.session.header.origin === 'subagent') {
+      archiveSettled(agent)
+      forget(agent.id)
+    }
   })
 
   // 启动预热：为已存在的会话回填标题（插件装配前产生的 session/title 事件）。
@@ -393,6 +429,14 @@ export function apply(ctx: Context, config: Config): void {
       } else {
         roots.push(row)
       }
+    }
+    // 完成态存档：settle 过的子代理保留在板上（浏览器决定何时因「已点开」转空闲并消失）。
+    for (const [id, record] of settledArchive) {
+      if (now - record.endedAt > ARCHIVE_KEEP_MS) {
+        settledArchive.delete(id)
+        continue
+      }
+      rows.push({ ...record, silentMs: now - record.lastActivity })
     }
     roots.sort((a, b) => b.lastActivity - a.lastActivity)
     rows.sort((a, b) => a.depth - b.depth || a.silentMs - b.silentMs)
