@@ -45,6 +45,7 @@ import {
   type BoardState,
 } from './state.js'
 import { loadViewed, markViewed, openBoardSession, renderBoardTree } from './tree.js'
+import { registerSubagentTab } from './subagent-tab.js'
 
 /** Poll interval (ms) while the tab is visible. 2s：状态/动作切换的感知延迟
  *  主要来自此周期；更快需要事件推送（SSE），暂未做。 */
@@ -1161,7 +1162,7 @@ function AgentBoardSettingRow() {
  * register the sidebar footer action and the settings row.
  * @param ctx - client root context (slots + cordis base).
  */
-export const inject = ['slots', 'sessions'] as const
+export const inject = ['slots', 'sessions', 'locale'] as const
 
 export function apply(ctx: ClientContext): void {
   loadViewed()
@@ -1182,4 +1183,6 @@ export function apply(ctx: ClientContext): void {
     app.mount()
     return () => app.dispose()
   }, 'agent-board: app')
+  // 会话页「子代理」tab（左主右子分屏），独立于双形态看板。
+  registerSubagentTab(ctx)
 }
