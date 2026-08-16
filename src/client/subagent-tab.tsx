@@ -139,8 +139,12 @@ interface CardEl {
   readonly idEl: HTMLSpanElement
   readonly statusEl: HTMLSpanElement
   readonly silentEl: HTMLSpanElement
+  readonly convBtnEl: HTMLButtonElement
   readonly openBtnEl: HTMLButtonElement
+  readonly collapseBtnEl: HTMLButtonElement
   readonly bodyEl: HTMLDivElement
+  readonly detailsEl: HTMLDivElement
+  readonly convEl: HTMLDivElement
   readonly convListEl: HTMLDivElement
 }
 
@@ -380,8 +384,12 @@ const TAB_CSS = `
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.03));
   overflow: hidden;
+  cursor: pointer;
 }
 .swt-card:hover { border-color: var(--dsw-alias-border-l2, rgba(154, 208, 255, 0.4)); }
+/* 单击展开聚焦：占满右侧（其余卡隐藏）；再点/收起返回分屏均分 */
+.swt-card.swt-expanded { flex: 1 1 auto; }
+.swt-card.swt-hidden { display: none; }
 .swt-card.swt-finished { opacity: 0.78; }
 .swt-card.swt-waiting {
   border-color: #fbbf24;
@@ -433,11 +441,28 @@ const TAB_CSS = `
 .swt-card-body {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* 折叠态监控卡：正文裁剪不滚动（行内省略号）；对话模式/展开态：容器内滚动 */
+.swt-card.swt-expanded .swt-card-body, .swt-card-body.swt-scroll { overflow-y: auto; }
+.swt-conv {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 .swt-conv-list { flex: 1; padding: 6px 8px; }
+/* 监控详情（默认正文）：折叠态省略号裁剪，展开态完整换行 */
+.swt-details { flex: none; padding: 4px 8px; overflow: hidden; }
+.swt-detail-row { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; }
+.swt-detail-label { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); }
+.swt-detail-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.swt-card.swt-expanded .swt-detail-val { white-space: pre-wrap; word-break: break-word; }
+.swt-detail-val.swt-stall { color: #f87171; font-weight: 700; }
+.swt-detail-val.swt-waiting-val { color: #fbbf24; }
+.swt-detail-val.swt-reply { color: var(--dsw-alias-label-secondary, #8b93a1); }
 .swt-hint {
   color: var(--dsw-alias-label-secondary, #9aa0a6);
   text-align: center;
@@ -487,6 +512,10 @@ const TAB_CSS = `
   .swt-st-waiting { background: #d97706; }
   .swt-card-id { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-card-status { color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swt-detail-label { color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swt-detail-val.swt-stall { color: #dc2626; }
+  .swt-detail-val.swt-waiting-val { color: #b45309; }
+  .swt-detail-val.swt-reply { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-card-status.swt-stall { color: #dc2626; }
   .swt-card-status.swt-waiting-val { color: #b45309; }
   .swt-card-silent { color: var(--dsw-alias-label-secondary, #6b7280); }
@@ -1060,6 +1089,10 @@ class SubagentTabController {
   private leftUnsub: (() => void) | null = null
 
   private snapshot: AgentBoardSnapshot | null = null
+  /** 展开聚焦的卡片 id（null = 分屏均分）。 */
+  private expandedId: string | null = null
+  /** 卡片 id → 对话流模式（监控卡 ↔ 对话流切换）。 */
+  private readonly convOnSet = new Set<string>()
   /** 左栏宽度（px）。 */
   private leftWidth = 0
   /** 左栏是否粘底（有新消息自动滚到底）。 */
@@ -1440,6 +1473,8 @@ class SubagentTabController {
       if (ids.has(id)) continue
       this.cardConv.delete(id)
       this.fetchingHistory.delete(id)
+      this.convOnSet.delete(id)
+      if (this.expandedId === id) this.expandedId = null
       card.root.remove()
       this.cards.delete(id)
     }
@@ -1456,7 +1491,7 @@ class SubagentTabController {
       if (row.status === 'running') running++
       const card = this.cards.get(row.id)
       if (card !== undefined) {
-        this.updateCardHead(card, row)
+        this.updateCard(card, row)
         this.maybeRefreshConversation(card, row)
       }
     }
@@ -1483,27 +1518,82 @@ class SubagentTabController {
     statusEl.className = 'swt-card-status'
     const silentEl = document.createElement('span')
     silentEl.className = 'swt-card-silent'
+    const convBtnEl = document.createElement('button')
+    convBtnEl.type = 'button'
+    convBtnEl.className = 'swt-card-btn swt-btn-primary'
+    convBtnEl.textContent = '对话'
+    convBtnEl.title = '切换监控卡 / 该子代理对话流'
     const openBtnEl = document.createElement('button')
     openBtnEl.type = 'button'
-    openBtnEl.className = 'swt-card-btn swt-btn-primary'
+    openBtnEl.className = 'swt-card-btn'
     openBtnEl.textContent = '跳转'
     openBtnEl.title = '打开该子代理会话'
+    const collapseBtnEl = document.createElement('button')
+    collapseBtnEl.type = 'button'
+    collapseBtnEl.className = 'swt-card-btn'
+    collapseBtnEl.textContent = '▾ 收起'
+    collapseBtnEl.title = '返回分屏均分'
+    collapseBtnEl.style.display = 'none'
     head.appendChild(dotEl)
     head.appendChild(titleEl)
     head.appendChild(idEl)
     head.appendChild(statusEl)
     head.appendChild(silentEl)
+    head.appendChild(convBtnEl)
     head.appendChild(openBtnEl)
+    head.appendChild(collapseBtnEl)
 
+    // 监控详情（默认正文）：状态/动作/静默/最新答复/等待。
     const body = document.createElement('div')
     body.className = 'swt-card-body'
+    const detailsEl = document.createElement('div')
+    detailsEl.className = 'swt-details'
+    for (const labelText of ['状态', '动作', '静默', '最新答复', '等待']) {
+      const r = document.createElement('div')
+      r.className = 'swt-detail-row'
+      const l = document.createElement('span')
+      l.className = 'swt-detail-label'
+      l.textContent = labelText
+      const v = document.createElement('span')
+      v.className = 'swt-detail-val'
+      r.appendChild(l)
+      r.appendChild(v)
+      detailsEl.appendChild(r)
+    }
+    const convEl = document.createElement('div')
+    convEl.className = 'swt-conv'
+    convEl.style.display = 'none'
     const convList = document.createElement('div')
     convList.className = 'swt-conv-list'
-    body.appendChild(convList)
+    convEl.appendChild(convList)
+    body.appendChild(detailsEl)
+    body.appendChild(convEl)
     root.appendChild(head)
     root.appendChild(body)
 
-    openBtnEl.addEventListener('click', () => this.openSubagent(row))
+    // 单击（非按钮）＝展开聚焦/收起；拖动（滚动）超过阈值不算点击。
+    let downX = 0
+    let downY = 0
+    root.addEventListener('pointerdown', (e) => {
+      downX = e.clientX
+      downY = e.clientY
+    })
+    root.addEventListener('click', (e) => {
+      if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > CLICK_MOVE_PX) return
+      this.toggleExpanded(row.id)
+    })
+    collapseBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.toggleExpanded(row.id)
+    })
+    convBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.toggleConversation(row.id)
+    })
+    openBtnEl.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.openSubagent(row)
+    })
 
     return {
       id: row.id,
@@ -1513,14 +1603,18 @@ class SubagentTabController {
       idEl,
       statusEl,
       silentEl,
+      convBtnEl,
       openBtnEl,
+      collapseBtnEl,
       bodyEl: body,
+      detailsEl,
+      convEl,
       convListEl: convList,
     }
   }
 
-  /** 卡片头：状态点/标题/状态/静默/等待高亮。 */
-  private updateCardHead(card: CardEl, row: AgentSnapshotRow): void {
+  /** 卡片：头部监控信息 + 监控详情 + 展开/对话布局。 */
+  private updateCard(card: CardEl, row: AgentSnapshotRow): void {
     const threshold = this.snapshot?.stallThresholdMs ?? 0
     const { text, stalled } = statusText(row, threshold)
     const waiting = row.waiting !== undefined
@@ -1542,6 +1636,91 @@ class SubagentTabController {
     card.statusEl.className = `swt-card-status${waiting ? ' swt-waiting-val' : ''}${stalled ? ' swt-stall' : ''}`
     // 静默（仅 running 显示）。
     card.silentEl.textContent = row.status === 'running' ? `静默 ${formatDuration(row.silentMs)}` : ''
+    // 监控详情行。
+    const vals = this.cardDetailVals(card)
+    vals.status.textContent = text === '' ? (row.status === 'running' ? '运行中' : row.status) : text
+    vals.status.className = `swt-detail-val${stalled ? ' swt-stall' : ''}${waiting ? ' swt-waiting-val' : ''}`
+    vals.action.textContent = row.action !== undefined
+      ? (row.action.kind === 'tool' ? row.action.text : '输出中…')
+      : '—'
+    vals.silent.textContent = row.status === 'running' ? formatDuration(row.silentMs) : '—'
+    vals.reply.textContent = row.lastReply ?? '—'
+    vals.reply.className = 'swt-detail-val swt-reply'
+    vals.waiting.textContent = row.waiting ?? '—'
+    vals.waiting.className = `swt-detail-val${waiting ? ' swt-waiting-val' : ''}`
+    // 布局：展开聚焦（完整信息+对话区）↔ 分屏均分；监控卡 ↔ 对话流。
+    this.layoutCard(card)
+  }
+
+  /** 取监控详情行值 span（按行 key）。 */
+  private cardDetailVals(card: CardEl): Record<'status' | 'action' | 'silent' | 'reply' | 'waiting', HTMLSpanElement> {
+    const spans = Array.from(card.detailsEl.querySelectorAll<HTMLSpanElement>('.swt-detail-val'))
+    const labels = Array.from(card.detailsEl.querySelectorAll<HTMLSpanElement>('.swt-detail-label'))
+    const out = {} as Record<'status' | 'action' | 'silent' | 'reply' | 'waiting', HTMLSpanElement>
+    for (const [i, label] of labels.entries()) {
+      const key = (label.textContent ?? '') as '状态' | '动作' | '静默' | '最新答复' | '等待'
+      const map: Record<string, 'status' | 'action' | 'silent' | 'reply' | 'waiting'> = {
+        '状态': 'status', '动作': 'action', '静默': 'silent', '最新答复': 'reply', '等待': 'waiting',
+      }
+      out[map[key]] = spans[i]!
+    }
+    return out
+  }
+
+  /** 布局：折叠态监控卡 ↔ 对话流二选一；展开态完整信息 + 对话区同显。 */
+  private layoutCard(card: CardEl): void {
+    const expanded = this.expandedId === card.id
+    const convOn = this.convOnSet.has(card.id)
+    card.root.classList.toggle('swt-expanded', expanded)
+    card.root.classList.toggle('swt-hidden', this.expandedId !== null && !expanded)
+    card.collapseBtnEl.style.display = expanded ? '' : 'none'
+    card.convBtnEl.textContent = convOn ? '监控' : '对话'
+    // 折叠态：监控卡（详情）↔ 对话流二选一；展开态：完整信息 + 对话区。
+    card.detailsEl.style.display = expanded || !convOn ? '' : 'none'
+    card.convEl.style.display = convOn ? 'flex' : 'none'
+    // 正文滚动：仅对话模式/展开态需要（监控卡折叠态裁剪，无滚动条）。
+    card.bodyEl.classList.toggle('swt-scroll', convOn)
+  }
+
+  // ------------------------------------------------------------ 卡片交互
+
+  /** 单击展开聚焦（占满右侧，完整信息 + 对话区）；再点/收起返回分屏均分（监控墙）。 */
+  private toggleExpanded(id: string): void {
+    if (this.expandedId === id) {
+      this.expandedId = null
+      // 返回分屏均分 = 回到默认监控卡（对话模式复位，由「对话」按钮显式开启）。
+      this.convOnSet.delete(id)
+    } else {
+      this.expandedId = id
+      // 展开即显示对话区（完整信息 + 对话区）。
+      this.convOnSet.add(id)
+      const card = this.cards.get(id)
+      if (card !== undefined) this.ensureConversationLoaded(card)
+    }
+    this.reapplyCards()
+  }
+
+  /** 「对话」按钮：监控卡 ↔ 对话流切换。 */
+  private toggleConversation(id: string): void {
+    if (this.convOnSet.has(id)) {
+      this.convOnSet.delete(id)
+    } else {
+      this.convOnSet.add(id)
+      const card = this.cards.get(id)
+      if (card !== undefined) this.ensureConversationLoaded(card)
+    }
+    this.reapplyCards()
+  }
+
+  /** 保证对话流已加载（首次进入对话模式/展开时触发）。 */
+  private ensureConversationLoaded(card: CardEl): void {
+    const row = this.snapshot?.rows.find(r => r.id === card.id)
+    if (row === undefined) return
+    if (!this.cardConv.has(card.id) || this.cardConv.get(card.id)!.state === 'fail') {
+      this.maybeRefreshConversation(card, row)
+    } else {
+      this.renderCardConversation(card, row)
+    }
   }
 
   /** 打开子代理会话（复用 tree.ts openBoardSession + 已读标记）。失败给红色反馈。 */
