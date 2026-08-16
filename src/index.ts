@@ -36,7 +36,7 @@ import { join } from 'node:path'
 import { makeAgentBoardRoutes } from './routes.js'
 
 export const name = '@dsh-external/dsh-agent-board'
-export const inject = ['agents', 'webServer', 'subagents'] as const
+export const inject = ['agents', 'webServer', 'subagents', 'workspaceRegistry'] as const
 
 /** 配置：扫描周期 / 停滞阈值 / 重复提醒节流（毫秒）。 */
 export interface Config {
@@ -160,6 +160,10 @@ declare module 'cordis' {
   interface Context {
     readonly agents: AgentRegistryLike
     readonly subagents: SubagentsLike
+    /** 工作区注册表（归档会话集合；归档的主 agent 连同其子代理树一起从看板隐藏）。 */
+    readonly workspaceRegistry: {
+      readonly archivedSessionIds: readonly string[]
+    }
   }
   interface Events {
     'session/event'(session: SessionLike, event: SessionEventLike): void
@@ -497,11 +501,32 @@ export function apply(ctx: Context, config: Config): void {
 
   // JSON 快照：浏览器半区的「Agent 看板」轮询此端点。顶层会话进 roots，
   // 子代理进 rows（parentSession 关联成树）。
+  /** 归档集合（含级联）：归档的主 agent + 其整个子代理后代都不显示。 */
+  const archivedSet = (): Set<string> => {
+    const archived = new Set<string>(ctx.workspaceRegistry.archivedSessionIds)
+    let grew = true
+    while (grew) {
+      grew = false
+      const cascade = (parent: string | undefined, child: string): void => {
+        if (parent !== undefined && archived.has(parent) && !archived.has(child)) {
+          archived.add(child)
+          grew = true
+        }
+      }
+      for (const agent of ctx.agents.list()) cascade(agent.session.header.parentSession, agent.id)
+      for (const [, record] of settledArchive) cascade(record.parentSession, record.id)
+    }
+    return archived
+  }
+
   const snapshot = (): AgentBoardSnapshot => {
     const now = Date.now()
+    const archived = archivedSet()
     const roots: AgentSnapshotRow[] = []
     const rows: AgentSnapshotRow[] = []
     for (const agent of ctx.agents.list()) {
+      // 归档会话（含被级联的子代理）不显示。
+      if (archived.has(agent.id)) continue
       const header = agent.session.header
       const events = agent.session.events
       const last = lastActivity.get(agent.id)
@@ -535,6 +560,7 @@ export function apply(ctx: Context, config: Config): void {
     }
     // 完成态存档：settle 过的子代理保留在板上（浏览器决定何时因「已点开」转空闲并消失）。
     for (const [id, record] of settledArchive) {
+      if (archived.has(id) || archived.has(record.parentSession ?? '')) continue
       if (now - record.endedAt > ARCHIVE_KEEP_MS) {
         settledArchive.delete(id)
         persistArchive()
