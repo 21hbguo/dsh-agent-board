@@ -140,6 +140,18 @@ const WIDGET_CSS = `
 .swd-dot-ring { background: transparent; border: 1.5px solid; }
 .swd-toggle { cursor: pointer; color: #9aa0a6; font-size: 9px; flex: none; width: 10px; text-align: center; }
 .swd-toggle:hover { color: #fff; }
+.swd-open {
+  cursor: pointer;
+  color: #6b7280;
+  font-size: 10px;
+  flex: none;
+  width: 12px;
+  text-align: center;
+  margin-left: 2px;
+}
+.swd-open:hover { color: #9ad0ff; }
+/* 完成态行：整体弱化，突出「已完成」而不抢 running 的注意力 */
+.swd-finished-line { opacity: 0.62; }
 .swd-tag {
   color: #0f172a;
   background: #60a5fa;
@@ -200,9 +212,12 @@ const WIDGET_CSS = `
 /** 根筛选窗口：最近活跃（working 或刚结束）的顶层会话才显示，更老的隐藏。 */
 const ROOT_ACTIVE_WINDOW_MS = 30 * 60_000
 
-/** 完成态保留期：子代理完成后短暂显示（方便瞄一眼结果），超时自动消失，
- *  避免旧完成节点堆积。默认 5 秒；太短可调大。 */
-const FINISHED_SHOW_MS = 5_000
+/** 完成态保留期：子代理完成后继续保留在板上（父根可见期间可查看），
+ *  超时自动消失，避免旧完成节点无限堆积。与根活跃窗口同量级。 */
+const FINISHED_KEEP_MS = 30 * 60_000
+
+/** 每个根下最多保留的完成态子代理行数（running 不限），防海量堆积。 */
+const MAX_FINISHED_PER_ROOT = 12
 
 /** 人类可读的时长。 */
 function formatDuration(ms: number): string {
@@ -263,7 +278,9 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
 }
 
 /** 渲染一个树节点（递归）。根节点（顶层会话）蓝色点，当前会话加「当前」标记；
- *  子代理节点显示「子代理<兄弟序号>-<创建名>」。 */
+ *  子代理节点显示「子代理<兄弟序号>-<创建名>」。
+ *  交互：有子节点的根——整行点击 = 展开/折叠，右侧 ⤢ = 打开会话；
+ *  叶子节点（无子节点）——点击 = 打开会话。 */
 function renderNode(
   node: TreeNode,
   threshold: number,
@@ -271,16 +288,27 @@ function renderNode(
   opts: { isRoot?: boolean; isCurrent?: boolean; idx?: number; collapsed?: boolean; onToggle?: () => void } = {},
 ): HTMLLIElement {
   const { row } = node
+  const hasChildren = node.children.length > 0
   const li = document.createElement('li')
   const line = document.createElement('div')
   line.className = 'swd-node'
-  line.title = row.lastReply !== undefined
-    ? `点击打开会话 ${row.id}\n最新答复：${row.lastReply}`
-    : `点击打开会话 ${row.id}`
-  line.addEventListener('click', (e) => {
-    e.stopPropagation()
-    onOpen(row.id, row.parentSession)
-  })
+  if (row.status === 'finished') line.classList.add('swd-finished-line')
+  // 点击语义：有子节点的根 → 展开/折叠；无子节点 → 打开会话。
+  if (opts.isRoot === true && hasChildren) {
+    line.title = `点击展开/折叠子树；⤢ 打开会话 ${row.id}`
+    line.addEventListener('click', (e) => {
+      e.stopPropagation()
+      opts.onToggle?.()
+    })
+  } else {
+    line.title = row.lastReply !== undefined
+      ? `点击打开会话 ${row.id}\n最新答复：${row.lastReply}`
+      : `点击打开会话 ${row.id}`
+    line.addEventListener('click', (e) => {
+      e.stopPropagation()
+      onOpen(row.id, row.parentSession)
+    })
+  }
   const { text, stalled } = statusText(row, threshold)
   const stClass = stalled ? 'swd-st-stall'
     : row.status === 'finished' ? 'swd-st-finished'
@@ -298,8 +326,8 @@ function renderNode(
         ? `子代理${opts.idx ?? '?'}-${row.label.slice(0, 24)}`
         : (row.title ?? row.id.slice(0, 8)))
   idEl.title = row.id
-  // 根节点折叠开关（idle 根默认折叠为单行）
-  if (opts.isRoot === true) {
+  // 根节点折叠开关：仅当真有子节点可展示时才渲染（空根不画假按钮）。
+  if (opts.isRoot === true && hasChildren) {
     const toggle = document.createElement('span')
     toggle.className = 'swd-toggle'
     toggle.textContent = opts.collapsed === true ? '▸' : '▾'
@@ -309,6 +337,16 @@ function renderNode(
       opts.onToggle?.()
     })
     line.appendChild(toggle)
+    // 打开会话按钮：整行点击改为展开/折叠后，跳转挪到这里。
+    const open = document.createElement('span')
+    open.className = 'swd-open'
+    open.textContent = '⤢'
+    open.title = '打开会话'
+    open.addEventListener('click', (e) => {
+      e.stopPropagation()
+      onOpen(row.id, row.parentSession)
+    })
+    line.appendChild(open)
   }
   line.appendChild(dot)
   if (opts.isCurrent === true) {
@@ -638,9 +676,9 @@ class AgentBoardWidget {
     this.offlineEl.style.display = 'none'
     const currentId = this.ctx.sessions.list.getSnapshot().current
     const now = snapshot.now
-    // 完成项：完成后短暂显示（方便瞄一眼结果），超过保留期自动消失，不堆积。
+    // 完成项：保留期（30 分钟）内留在板上，超期自动消失；running 恒保留。
     const keptRows = snapshot.rows.filter(row => !(
-      row.status === 'finished' && now - row.lastActivity > FINISHED_SHOW_MS
+      row.status === 'finished' && now - row.lastActivity > FINISHED_KEEP_MS
     ))
     // 根筛选：当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
     // 其余历史会话不显示（避免整屏都是 idle 树）。
@@ -650,6 +688,18 @@ class AgentBoardWidget {
       || keptRows.some(row => row.parentSession === root.id)
     ))
     const forest = buildForest(keptRoots, keptRows)
+    // 完成项防堆积：每个节点下最多保留 MAX_FINISHED_PER_ROOT 条 finished。
+    const trimFinished = (node: TreeNode): void => {
+      let kept = 0
+      node.children = node.children.filter(child => {
+        if (child.row.status !== 'finished') return true
+        if (kept >= MAX_FINISHED_PER_ROOT) return false
+        kept++
+        return true
+      })
+      for (const child of node.children) trimFinished(child)
+    }
+    for (const root of forest) trimFinished(root)
     this.treeEl.replaceChildren()
     if (forest.length === 0) {
       const empty = document.createElement('div')
@@ -663,26 +713,32 @@ class AgentBoardWidget {
     const runningCount = countRunning(forest)
     this.titleTextEl.textContent = total === 0 ? 'Agent 看板' : `Agent ${runningCount}/${total}`
     for (const root of forest) {
-      // idle 根默认折叠为单行（除非用户展开过）；running 根默认展开。
-      const defaultCollapsed = root.row.status === 'idle'
+      // 折叠默认值：idle 且没有 running 子代理的根才折叠为单行；
+      // 有在跑子代理的根（即使自身 idle 在等结果）默认展开，子代理立即可见。
+      const hasRunningChild = (node: TreeNode): boolean =>
+        node.children.some(c => c.row.status === 'running' || hasRunningChild(c))
+      const defaultCollapsed = root.row.status === 'idle' && !hasRunningChild(root)
       const collapsed = this.collapsedRoots.has(root.row.id)
         || (defaultCollapsed && !this.expandedRoots.has(root.row.id))
       this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, (id, parentId) => this.openSession(id, parentId), {
         isRoot: true,
         isCurrent: root.row.id === currentId,
         collapsed,
-        onToggle: () => {
-          if (collapsed) {
-            this.collapsedRoots.delete(root.row.id)
-            this.expandedRoots.add(root.row.id)
-          } else {
-            this.collapsedRoots.add(root.row.id)
-            this.expandedRoots.delete(root.row.id)
-          }
-          if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
-        },
+        onToggle: () => this.toggleRoot(root.row.id),
       }))
     }
+  }
+
+  /** 翻转一个根的展开/折叠状态（整行点击与 ▸/▾ 共用）。 */
+  private toggleRoot(id: string): void {
+    if (this.collapsedRoots.has(id)) {
+      this.collapsedRoots.delete(id)
+      this.expandedRoots.add(id)
+    } else {
+      this.collapsedRoots.add(id)
+      this.expandedRoots.delete(id)
+    }
+    if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
   }
 
   /** 点击节点跳转会话。 */
