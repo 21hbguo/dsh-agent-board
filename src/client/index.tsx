@@ -364,15 +364,29 @@ function renderNode(
   return li
 }
 
-/** 从 host 投影查子代理的 mode（continuable/one-shot），用于构造导航地址。 */
+/** 生成一次 RPC 调用的 rpcId。`crypto.randomUUID` 仅在 secure context
+ *  （HTTPS / localhost）可用；通过 http://LAN-IP 访问 dsh Web UI 时不可用，
+ *  退化为时间戳 + 随机串（与 OpenBiliClaw 的兼容写法一致）。 */
+function newRpcId(): string {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+
+/** 看板级 mode 缓存：父会话 → 子代理 → mode（host 投影结果，settle 后稳定；
+ *  避免每次点击重复请求 ~400ms 的 /api/subagent.list）。 */
+const childModeCache = new Map<string, Map<string, 'continuable' | 'one-shot'>>()
+
+/** 从 host 投影查子代理的 mode（continuable/one-shot），用于构造导航地址。
+ *  首次查询整表缓存，后续 0 请求。 */
 async function findChildMode(parentId: string, childId: string): Promise<'continuable' | 'one-shot' | undefined> {
+  const cached = childModeCache.get(parentId)?.get(childId)
+  if (cached !== undefined) return cached
   try {
     const res = await fetch('/api/subagent.list', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         type: 'client-request',
-        rpcId: crypto.randomUUID(),
+        rpcId: newRpcId(),
         method: 'subagent.list',
         payload: { parentSessionId: parentId },
       }),
@@ -381,19 +395,23 @@ async function findChildMode(parentId: string, childId: string): Promise<'contin
     const full = await res.json() as {
       result?: { ok?: boolean; value?: { entries?: readonly { id: string; kind?: string; mode?: string }[] } }
     }
-    const entry = full.result?.ok === true
-      ? full.result.value?.entries?.find(e => e.id === childId)
-      : undefined
-    if (entry?.kind === 'child' && (entry.mode === 'continuable' || entry.mode === 'one-shot')) {
-      return entry.mode
+    if (full.result?.ok === true) {
+      const map = new Map<string, 'continuable' | 'one-shot'>()
+      for (const e of full.result.value?.entries ?? []) {
+        if (e.kind === 'child' && (e.mode === 'continuable' || e.mode === 'one-shot')) map.set(e.id, e.mode)
+      }
+      childModeCache.set(parentId, map)
+      return map.get(childId)
     }
   } catch { /* 查询失败继续兜底 */ }
   return undefined
 }
 
 /** 跳转到子代理的会话。分层兜底（finished 存档的子代理不在导航地址/列表中）：
- *  ① 已有 catalog 地址 → openSubagent；② 刷新父 catalog + host 投影构造地址；
- *  ③ 普通 open。 */
+ *  ① 已有 catalog 地址 → openSubagent（0 请求）；
+ *  ② 子代理快速路径：同步 open 立即跳转（与侧边栏同速），后台补 catalog/地址；
+ *  ③ 慢路径兜底：并行拉 catalog + mode 再 openSubagent；
+ *  ④ 根会话：同步 open。 */
 async function openSession(ctx: ClientContext, id: string, parentId: string | undefined): Promise<void> {
   const tryAddress = (address: { parentSessionId: string; childSessionId: string; mode: 'continuable' | 'one-shot' }): boolean => {
     try {
@@ -404,13 +422,34 @@ async function openSession(ctx: ClientContext, id: string, parentId: string | un
   // ① 已有导航地址
   const known = ctx.sessions.subagentAddress(id)
   if (known !== undefined && tryAddress(known)) return
-  // ② 刷新父 catalog（host 持久化投影含已 settle 子代理），构造地址再试
+  // ② 子代理快速路径：先同步打开（立即跳转），后台补 catalog/地址
   if (parentId !== undefined) {
-    try { await ctx.sessions.refreshSubagents(parentId) } catch { /* 刷新失败继续 */ }
-    const mode = await findChildMode(parentId, id)
+    let opened = false
+    try {
+      ctx.sessions.open(id)
+      opened = true
+    } catch { /* 不在全局列表，走慢路径 */ }
+    if (opened) {
+      void (async () => {
+        try {
+          await ctx.sessions.refreshSubagents(parentId)
+          // 用户已切走则不抢回 current
+          if (ctx.sessions.list.getSnapshot().current !== id) return
+          const mode = await findChildMode(parentId, id)
+          if (mode !== undefined) tryAddress({ parentSessionId: parentId, childSessionId: id, mode })
+        } catch { /* 后台补地址失败不影响已完成的跳转 */ }
+      })()
+      return
+    }
+    // ③ 慢路径兜底：并行拉 catalog + mode
+    await Promise.all([
+      ctx.sessions.refreshSubagents(parentId).catch(() => undefined),
+      findChildMode(parentId, id),
+    ])
+    const mode = await findChildMode(parentId, id) // 缓存命中，0 请求
     if (mode !== undefined && tryAddress({ parentSessionId: parentId, childSessionId: id, mode })) return
   }
-  // ③ 普通 open（顶层会话；子代理会话不在列表时可能抛错，静默）
+  // ④ 普通 open（顶层会话；子代理会话不在列表时可能抛错，静默）
   try {
     ctx.sessions.open(id)
   } catch { /* unknown session：静默，避免打断看板 */ }
