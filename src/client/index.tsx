@@ -761,6 +761,14 @@ class AgentBoardWidget {
 
   private renderCollapse(): void {
     this.bodyEl.style.display = this.state.collapsed ? 'none' : 'block'
+    // 折叠：窗口收缩到只剩标题栏（resize 过的固定高度不残留空容器）；
+    // 展开：恢复持久化高度（resize 过的固定值）或内容自适应。
+    if (this.state.collapsed) {
+      this.root.style.height = 'auto'
+      this.root.style.maxHeight = 'none'
+    } else {
+      this.applySize()
+    }
   }
 
   /** 应用字号（px，CSS 变量；辅助元素字号自动降 1px）。 */
