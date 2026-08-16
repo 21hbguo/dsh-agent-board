@@ -12,7 +12,11 @@
 
 ---
 
-![Agent 看板悬浮窗：绿=working / 蓝=完成 / 灰=已读空闲 / 红=停滞](docs/screenshots/agent-board-widget.png)
+![Agent 看板：树形子代理实时监控（绿=working / 蓝=完成 / 灰=已读空闲 / 红=停滞）](docs/screenshots/agent-board-widget.png)
+
+*生命周期演示：子代理运行中（绿）→ 完成（蓝）→ 双击打开后转空闲（灰）*
+
+![完成态](docs/screenshots/agent-board-done.png) ![已读态](docs/screenshots/agent-board-read.png)
 
 ## ✨ 特性
 
