@@ -39,8 +39,10 @@ import {
   saveState,
   TOGGLE_EVENT,
   MODE_EVENT,
+  SIZE_EVENT,
   type BoardMode,
   type BoardState,
+  type FloatingSize,
 } from './state.js'
 import { loadViewed, markViewed, openBoardSession, renderBoardTree } from './tree.js'
 
@@ -55,6 +57,7 @@ const TOGGLE_EVENT_NAME = TOGGLE_EVENT
 interface WidgetBoardActions {
   onOpen: (id: string, parentId?: string) => Promise<boolean>
   openModeMenu: (anchor: HTMLElement, onClose: () => void) => void
+  openSizeMenu: (anchor: HTMLElement, onClose: () => void) => void
   onHide: () => void
   onCollapsedChange: (collapsed: boolean) => void
 }
@@ -114,6 +117,16 @@ const WIDGET_CSS = `
   padding: 0 4px;
 }
 .swd-mode-btn:hover { color: #fff; }
+.swd-size-btn {
+  cursor: pointer;
+  color: #9aa0a6;
+  border: none;
+  background: none;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 4px;
+}
+.swd-size-btn:hover { color: #fff; }
 .swd-body { overflow-y: auto; padding: 6px 8px; }
 .swd-tree { margin: 0; padding: 0; list-style: none; }
 /* 子代理层级：每层 28px 缩进 + 树线（根行有 ▸ 占位约 15px，加大缩进保证层级错开明显） */
@@ -235,6 +248,35 @@ const WIDGET_CSS = `
 }
 .swd-mode-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(154, 208, 255, 0.14)); }
 .swd-mode-item.active { color: var(--dsw-alias-brand-primary, #9ad0ff); font-weight: 700; }
+.swd-size-menu {
+  position: fixed;
+  z-index: 2147483647;
+  min-width: 160px;
+  padding: 4px;
+  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--dsw-alias-label-primary, #e6e6e6);
+  background: var(--dsw-alias-bg-overlay, rgba(17, 17, 20, 0.97));
+  border: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.14));
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+.swd-size-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: none;
+  border: none;
+  color: var(--dsw-alias-label-primary, #d7dde3);
+  text-align: left;
+  cursor: pointer;
+  border-radius: 5px;
+  font: inherit;
+  white-space: nowrap;
+}
+.swd-size-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(154, 208, 255, 0.14)); }
+.swd-size-item.active { color: var(--dsw-alias-brand-primary, #9ad0ff); font-weight: 700; }
 /* ===== 停靠右侧面板（跟随 shell 主题令牌） ===== */
 .swd-dock-col {
   display: flex;
@@ -320,6 +362,11 @@ const WIDGET_CSS = `
   .swd-close:hover { color: #111827; }
   .swd-mode-btn { color: #6b7280; }
   .swd-mode-btn:hover { color: #111827; }
+  .swd-size-btn { color: #6b7280; }
+  .swd-size-btn:hover { color: #111827; }
+  .swd-size-item { color: #374151; }
+  .swd-size-item:hover { background: rgba(37, 99, 235, 0.1); }
+  .swd-size-item.active { color: #2563eb; }
   .swd-tree ul { border-left: 1px dashed rgba(37, 99, 235, 0.3); }
   .swd-node:hover { background: rgba(37, 99, 235, 0.08); }
   .swd-opening { background: rgba(37, 99, 235, 0.16); }
@@ -412,6 +459,54 @@ const MODE_LABELS: Record<BoardMode | 'hidden', string> = {
   hidden: '隐藏',
 }
 
+/** 悬浮窗大小档位：宽度（px）与最大高度（vh）。 */
+const SIZE_PRESETS: Record<FloatingSize, { width: number; maxHeightVh: number; label: string }> = {
+  small: { width: 300, maxHeightVh: 45, label: '小 · 300px' },
+  medium: { width: 420, maxHeightVh: 60, label: '中 · 420px' },
+  large: { width: 560, maxHeightVh: 75, label: '大 · 560px' },
+}
+
+const SIZE_MENU_ITEMS: readonly FloatingSize[] = ['small', 'medium', 'large']
+
+/** 在锚点元素下方弹出悬浮窗大小菜单；选择即落盘并广播 SIZE_EVENT。 */
+function openSizeMenu(anchor: HTMLElement, onClose: () => void): void {
+  const current = loadState().floatingSize
+  const menu = document.createElement('div')
+  menu.className = 'swd-size-menu'
+  for (const size of SIZE_MENU_ITEMS) {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.className = `swd-size-item${size === current ? ' active' : ''}`
+    btn.textContent = SIZE_PRESETS[size].label
+    btn.addEventListener('click', () => {
+      close()
+      const s = loadState()
+      s.floatingSize = size
+      saveState(s)
+      document.dispatchEvent(new CustomEvent(SIZE_EVENT, { detail: { size } }))
+    })
+    menu.appendChild(btn)
+  }
+  document.body.appendChild(menu)
+  const rect = anchor.getBoundingClientRect()
+  menu.style.top = `${Math.max(4, Math.min(rect.bottom + 4, window.innerHeight - menu.offsetHeight - 8))}px`
+  menu.style.right = `${Math.max(4, window.innerWidth - rect.right)}px`
+  const close = (): void => {
+    document.removeEventListener('pointerdown', onPointer, true)
+    window.removeEventListener('keydown', onKey)
+    menu.remove()
+    onClose()
+  }
+  const onPointer = (e: PointerEvent): void => {
+    if (!menu.contains(e.target as Node)) close()
+  }
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') close()
+  }
+  document.addEventListener('pointerdown', onPointer, true)
+  window.addEventListener('keydown', onKey)
+}
+
 /** 当前形态（hidden = 隐藏）。 */
 function currentModeValue(state: BoardState): BoardMode | 'hidden' {
   return state.visible ? state.mode : 'hidden'
@@ -497,6 +592,7 @@ class AgentBoardWidget {
     this.root.className = 'swd-widget'
     this.root.style.top = `${this.state.top}px`
     this.root.style.right = `${this.state.right}px`
+    this.applySize(this.state.floatingSize)
 
     this.titleTextEl = document.createElement('span')
     this.titleTextEl.className = 'swd-title-left'
@@ -509,6 +605,15 @@ class AgentBoardWidget {
     modeBtn.addEventListener('click', (e) => {
       e.stopPropagation()
       this.actions.openModeMenu(modeBtn, () => { /* 菜单自行管理关闭 */ })
+    })
+
+    const sizeBtn = document.createElement('span')
+    sizeBtn.className = 'swd-size-btn'
+    sizeBtn.textContent = '▭'
+    sizeBtn.title = '调节悬浮窗大小（小 / 中 / 大）'
+    sizeBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.actions.openSizeMenu(sizeBtn, () => { /* 菜单自行管理关闭 */ })
     })
 
     const closeBtn = document.createElement('span')
@@ -524,11 +629,12 @@ class AgentBoardWidget {
     this.titleBarEl.className = 'swd-title'
     this.titleBarEl.title = 'Agent 看板（拖动移动 · 点击折叠/展开）'
     this.titleBarEl.appendChild(this.titleTextEl)
+    this.titleBarEl.appendChild(sizeBtn)
     this.titleBarEl.appendChild(modeBtn)
     this.titleBarEl.appendChild(closeBtn)
     this.titleBarEl.addEventListener('pointerdown', (e) => this.beginDrag(e))
     this.titleBarEl.addEventListener('click', (e) => {
-      if (e.target === closeBtn || e.target === modeBtn) return
+      if (e.target === closeBtn || e.target === modeBtn || e.target === sizeBtn) return
       if (this.suppressClick) {
         this.suppressClick = false
         return
@@ -584,6 +690,13 @@ class AgentBoardWidget {
     this.bodyEl.style.display = this.state.collapsed ? 'none' : 'block'
   }
 
+  /** 应用悬浮窗大小档位（宽 × 最大高）。 */
+  applySize(size: FloatingSize): void {
+    const preset = SIZE_PRESETS[size]
+    this.root.style.width = `${preset.width}px`
+    this.root.style.maxHeight = `${preset.maxHeightVh}vh`
+  }
+
   /** 离线提示（App 在传输失败时调用）。 */
   setOffline(offline: boolean): void {
     this.offlineEl.style.display = offline ? 'block' : 'none'
@@ -614,7 +727,7 @@ class AgentBoardWidget {
   }
 
   private beginDrag(e: PointerEvent): void {
-    if (e.target instanceof Element && (e.target.classList.contains('swd-close') || e.target.classList.contains('swd-mode-btn'))) return
+    if (e.target instanceof Element && (e.target.classList.contains('swd-close') || e.target.classList.contains('swd-mode-btn') || e.target.classList.contains('swd-size-btn'))) return
     this.dragging = true
     this.dragMoved = false
     this.dragPointerId = e.pointerId
@@ -676,6 +789,7 @@ class AgentBoardApp {
     const widgetActions: WidgetBoardActions = {
       onOpen: (id, parentId) => this.openSession(id, parentId),
       openModeMenu,
+      openSizeMenu,
       onHide: () => this.applyVisibility(false),
       onCollapsedChange: (collapsed) => {
         this.state.collapsed = collapsed
@@ -710,6 +824,7 @@ class AgentBoardApp {
     // 事件总线（监听器绑定为类字段，dispose 时可移除）。
     document.addEventListener(TOGGLE_EVENT_NAME, this.onToggleEvent)
     document.addEventListener(MODE_EVENT, this.onModeEvent as EventListener)
+    document.addEventListener(SIZE_EVENT, this.onSizeEvent as EventListener)
   }
 
   mount(): void {
@@ -748,6 +863,7 @@ class AgentBoardApp {
     this.removeSummon()
     document.removeEventListener(TOGGLE_EVENT_NAME, this.onToggleEvent)
     document.removeEventListener(MODE_EVENT, this.onModeEvent as EventListener)
+    document.removeEventListener(SIZE_EVENT, this.onSizeEvent as EventListener)
   }
 
   private readonly onToggleEvent = (): void => {
@@ -771,6 +887,14 @@ class AgentBoardApp {
     }
     saveState(this.state)
     this.sync()
+  }) as EventListener
+
+  /** 悬浮窗大小档位变更：落盘 + 应用宽高。 */
+  private readonly onSizeEvent = ((e: CustomEvent<{ size: FloatingSize }>) => {
+    if (e.detail.size === undefined) return
+    this.state.floatingSize = e.detail.size
+    saveState(this.state)
+    this.widget.applySize(e.detail.size)
   }) as EventListener
 
   /** 设置总开关并同步双形态。打开时自动展开（清折叠态）——

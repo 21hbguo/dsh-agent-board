@@ -10,6 +10,9 @@
 /** 看板形态：悬浮窗 / 停靠右侧面板 / 两者并存。 */
 export type BoardMode = 'floating' | 'docked' | 'both'
 
+/** 悬浮窗大小档位（宽 × 最大高）。 */
+export type FloatingSize = 'small' | 'medium' | 'large'
+
 /** 持久化的看板状态（兼容旧版：top/right/visible/collapsed 语义不变）。 */
 export interface BoardState {
   /** 悬浮窗位置（px，距视口上/右边缘）。 */
@@ -25,6 +28,8 @@ export interface BoardState {
   dockedWidth: number
   /** 停靠面板折叠为 0 宽（右侧出现展开按钮）。 */
   dockedCollapsed: boolean
+  /** 悬浮窗大小档位（标题栏 ▭ 按钮调节）。 */
+  floatingSize: FloatingSize
 }
 
 /** localStorage key for the board state. */
@@ -41,6 +46,9 @@ export const TOGGLE_EVENT = 'dsh.agentBoard.toggle'
 /** 形态变更事件（detail: { mode?, visible? }，缺省字段保持不变）。 */
 export const MODE_EVENT = 'dsh.agentBoard.mode'
 
+/** 悬浮窗大小变更事件（detail: { size }）。 */
+export const SIZE_EVENT = 'dsh.agentBoard.size'
+
 /** 默认状态。 */
 export const DEFAULT_STATE: BoardState = {
   top: 64,
@@ -50,6 +58,7 @@ export const DEFAULT_STATE: BoardState = {
   mode: 'floating',
   dockedWidth: DOCKED_DEFAULT_WIDTH,
   dockedCollapsed: false,
+  floatingSize: 'small',
 }
 
 export function loadState(): BoardState {
@@ -68,6 +77,7 @@ export function loadState(): BoardState {
           ? Math.min(DOCKED_MAX_WIDTH, Math.max(DOCKED_MIN_WIDTH, parsed.dockedWidth))
           : DOCKED_DEFAULT_WIDTH,
         dockedCollapsed: parsed.dockedCollapsed === true,
+        floatingSize: parsed.floatingSize === 'medium' || parsed.floatingSize === 'large' ? parsed.floatingSize : 'small',
       }
     }
   } catch { /* corrupted state falls back to defaults */ }
