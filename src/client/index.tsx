@@ -758,13 +758,35 @@ class AgentBoardApp {
     const detail = e.detail
     if (detail.mode !== undefined) this.state.mode = detail.mode
     if (detail.visible !== undefined) this.state.visible = detail.visible
+    // 切到可见形态即展开（清折叠态），避免「开了面板只剩一条线」。
+    if (this.state.visible) {
+      if (this.state.dockedCollapsed) {
+        this.state.dockedCollapsed = false
+        this.docked.syncLayout()
+      }
+      if (this.state.collapsed) {
+        this.state.collapsed = false
+        this.widget.renderCollapseNow()
+      }
+    }
     saveState(this.state)
     this.sync()
   }) as EventListener
 
-  /** 设置总开关并同步双形态。 */
+  /** 设置总开关并同步双形态。打开时自动展开（清折叠态）——
+   *  用户点「Agent 看板」期望看到内容，不留「只剩一条线」的折叠残留。 */
   private applyVisibility(visible: boolean): void {
     this.state.visible = visible
+    if (visible) {
+      if (this.state.dockedCollapsed) {
+        this.state.dockedCollapsed = false
+        this.docked.syncLayout()
+      }
+      if (this.state.collapsed) {
+        this.state.collapsed = false
+        this.widget.renderCollapseNow()
+      }
+    }
     saveState(this.state)
     this.sync()
   }

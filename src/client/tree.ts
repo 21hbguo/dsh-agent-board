@@ -229,18 +229,21 @@ export function renderBoardTree(opts: {
   /** 用户折叠/展开某根之后回调（surface 借此用最近快照重渲染）。 */
   afterToggle?: () => void
 }): TreeNode[] {
+  try {
   const { snapshot, currentId } = opts
   const now = snapshot.now
   // 完成项：保留期（30 分钟）内留在板上，超期自动消失；running 恒保留。
   const keptRows = snapshot.rows.filter(row => !(
     row.status === 'finished' && now - row.lastActivity > FINISHED_KEEP_MS
   ))
-  // 根筛选：当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
+  // 根筛选：无对话的空白会话不显示（含当前会话；`hasMessages` 缺省视为显示，
+  // 兼容旧 host）+ 当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
   // 其余历史会话不显示（避免整屏都是 idle 树）。
   const keptRoots = snapshot.roots.filter(root => (
-    root.id === currentId
-    || now - root.lastActivity < ROOT_ACTIVE_WINDOW_MS
-    || keptRows.some(row => row.parentSession === root.id)
+    root.hasMessages !== false
+    && (root.id === currentId
+      || now - root.lastActivity < ROOT_ACTIVE_WINDOW_MS
+      || keptRows.some(row => row.parentSession === root.id))
   ))
   const forest = buildForest(keptRoots, keptRows)
   // 完成项防堆积：每个节点下最多保留 MAX_FINISHED_PER_ROOT 条 finished。
@@ -296,6 +299,15 @@ export function renderBoardTree(opts: {
     }))
   }
   return forest
+  } catch (error: unknown) {
+    // 渲染异常不静默：树区显示错误行（否则只剩一条边界线，用户无从得知原因）。
+    opts.treeEl.replaceChildren()
+    opts.emptyEl.textContent = `渲染异常：${error instanceof Error ? error.message : String(error)}`
+    opts.emptyEl.style.display = 'block'
+    opts.treeEl.style.display = 'none'
+    if (opts.titleEl !== undefined) opts.titleEl.textContent = 'Agent 看板（渲染异常）'
+    return []
+  }
 }
 
 /** 生成一次 RPC 调用的 rpcId。`crypto.randomUUID` 仅在 secure context
