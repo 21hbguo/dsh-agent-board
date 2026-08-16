@@ -47,24 +47,6 @@ import {
 import { loadViewed, markViewed, openBoardSession, renderBoardTree } from './tree.js'
 import { registerSubagentTab } from './subagent-tab.js'
 
-// ===== 面板拼接协议（hosted 模式，就地内联声明，不 import 宿主包） =====
-// 宿主插件（@dsh-external/dsh-panel-composer）注入 window.__dshPanelHost；
-// 检测不到宿主时本插件行为与独立模式完全一致（见 AgentBoardApp.sync 分支）。
-interface ComposablePanel {
-  id: string
-  title: string
-  /** 纯内容视图根元素：无定位、无自带标题栏/关闭钮/拖拽手柄 */
-  element: HTMLElement
-  dispose?(): void
-}
-interface PanelHost {
-  register(panel: ComposablePanel): void
-  unregister(id: string): void
-}
-declare global {
-  interface Window { __dshPanelHost?: PanelHost }
-}
-
 /** Poll interval (ms) while the tab is visible. 2s：状态/动作切换的感知延迟
  *  主要来自此周期；更快需要事件推送（SSE），暂未做。 */
 const POLL_MS = 2000
@@ -532,14 +514,10 @@ class AgentBoardWidget {
   private readonly ctx: ClientContext
   private readonly state: BoardState
   private readonly actions: WidgetBoardActions
-  /** True when running under a panel host: the host owns the container,
-   *  title/tab and recall, this widget only renders the tree content. */
-  private readonly hosted: boolean
   private readonly root: HTMLDivElement
   private readonly titleBarEl: HTMLDivElement
   private readonly titleTextEl: HTMLSpanElement
-  /** 内容视图根（hosted 模式下注册给面板宿主的 element，不含标题栏）。 */
-  readonly bodyEl: HTMLDivElement
+  private readonly bodyEl: HTMLDivElement
   private readonly treeEl: HTMLUListElement
   private readonly emptyEl: HTMLDivElement
   private readonly offlineEl: HTMLDivElement
@@ -568,11 +546,10 @@ class AgentBoardWidget {
   /** 用户手动展开的根（覆盖 idle 默认折叠）。 */
   private readonly expandedRoots = new Set<string>()
 
-  constructor(ctx: ClientContext, state: BoardState, actions: WidgetBoardActions, hosted = false) {
+  constructor(ctx: ClientContext, state: BoardState, actions: WidgetBoardActions) {
     this.ctx = ctx
     this.state = state
     this.actions = actions
-    this.hosted = hosted
     this.root = document.createElement('div')
     this.root.className = 'swd-widget'
     // 修正历史坏值：位置不得出屏（早期版本拖拽可能落盘 right<0）
@@ -764,19 +741,12 @@ class AgentBoardWidget {
   }
 
   show(): void {
-    if (this.hosted) {
-      // hosted 模式：挂载/卸载由宿主容器负责，root 不进 body。
-      this.renderCollapse()
-      if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
-      return
-    }
     if (!this.root.isConnected) document.body.appendChild(this.root)
     this.renderCollapse()
     if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
   }
 
   hide(): void {
-    if (this.hosted) return // 宿主管卸载，插件不动 DOM
     this.root.remove()
   }
 
@@ -810,9 +780,7 @@ class AgentBoardWidget {
   /** 渲染最新快照（App 轮询/SSE/current 变化时调用）。 */
   render(snapshot: AgentBoardSnapshot): void {
     this.lastSnapshot = snapshot
-    // hosted 模式：root 不进 body，改为以「内容是否挂在宿主容器里」为准
-    // （bodyEl.isConnected）；独立模式下 bodyEl 与 root 同在文档，语义等价。
-    if (!this.bodyEl.isConnected) return
+    if (!this.root.isConnected) return
     this.setOffline(false)
     const currentId = this.ctx.sessions.list.getSnapshot().current
     renderBoardTree({
@@ -876,11 +844,6 @@ class AgentBoardApp {
   private readonly state: BoardState
   private readonly widget: AgentBoardWidget
   private readonly docked: DockedAgentBoard
-  /** hosted 模式：floating 视图注册进面板宿主（构造时探测，无宿主则 undefined）。 */
-  private readonly host: PanelHost | undefined
-  private readonly hostPanel: ComposablePanel | undefined
-  /** floating 面板当前是否已在宿主容器里（dispose/宿主丢弃时用于注销）。 */
-  private hostRegistered = false
   private lastSnapshot: AgentBoardSnapshot | null = null
   private lastRenderedCurrent: string | undefined
   private timer: number | undefined
@@ -894,7 +857,6 @@ class AgentBoardApp {
   constructor(ctx: ClientContext) {
     this.ctx = ctx
     this.state = loadState()
-    this.host = window.__dshPanelHost
 
     const widgetActions: WidgetBoardActions = {
       onOpen: (id, parentId) => this.openSession(id, parentId),
@@ -946,24 +908,9 @@ class AgentBoardApp {
       },
     }
 
-    this.widget = new AgentBoardWidget(ctx, this.state, widgetActions, this.host !== undefined)
+    this.widget = new AgentBoardWidget(ctx, this.state, widgetActions)
     this.docked = new DockedAgentBoard(ctx, dockedActions)
     this.docked.bindState(this.state)
-
-    // hosted 模式：floating 视图的注册面板对象（同一对象复用；register 幂等
-    // 由宿主保证）。宿主丢弃面板时回调 dispose（注销 + widget 清理）。
-    if (this.host !== undefined) {
-      this.hostPanel = {
-        id: 'agent-board',
-        title: 'Agent 看板',
-        element: this.widget.bodyEl,
-        dispose: () => {
-          this.hostRegistered = false
-          this.host?.unregister('agent-board')
-          this.widget.dispose()
-        },
-      }
-    }
 
     // 事件总线（监听器绑定为类字段，dispose 时可移除）。
     document.addEventListener(TOGGLE_EVENT_NAME, this.onToggleEvent)
@@ -1003,11 +950,6 @@ class AgentBoardApp {
     this.unsubscribeList = null
     this.sseSource?.close()
     this.sseSource = null
-    // hosted 模式：floating 面板若还在宿主容器里，先注销再清理。
-    if (this.hostRegistered) {
-      this.host?.unregister('agent-board')
-      this.hostRegistered = false
-    }
     this.widget.dispose()
     this.docked.dispose()
     this.removeSummon()
@@ -1066,27 +1008,12 @@ class AgentBoardApp {
     this.sync()
   }
 
-  /** 按 mode/visible 编排双形态的显隐。
-   *  hosted 模式：floating 视图注册进宿主容器（宿主管挂载/标题/显隐），
-   *  docked 形态、summon、轮询行为与独立模式一致。 */
+  /** 按 mode/visible 编排双形态的显隐。 */
   private sync(): void {
     const showFloating = this.state.visible && (this.state.mode === 'floating' || this.state.mode === 'both')
     const showDocked = this.state.visible && (this.state.mode === 'docked' || this.state.mode === 'both')
-    if (this.host !== undefined && this.hostPanel !== undefined) {
-      if (showFloating) {
-        if (!this.hostRegistered) {
-          this.host.register(this.hostPanel)
-          this.hostRegistered = true
-        }
-      } else if (this.hostRegistered) {
-        this.host.unregister('agent-board')
-        this.hostRegistered = false
-      }
-      // floating 视图的挂载/卸载由宿主负责：不调用 widget.show()/hide()。
-    } else {
-      if (showFloating) this.widget.show()
-      else this.widget.hide()
-    }
+    if (showFloating) this.widget.show()
+    else this.widget.hide()
     if (showDocked) this.docked.show()
     else this.docked.hide()
     this.renderSummon()
