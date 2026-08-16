@@ -21,6 +21,12 @@ export const FINISHED_KEEP_MS = 30 * 60_000
 /** 每个根下最多保留的完成态子代理行数（running 不限），防海量堆积。 */
 export const MAX_FINISHED_PER_ROOT = 12
 
+/** 完成态保留期过滤（可复用）：finished 且超期（30 分钟）剔除，其余保留。
+ *  悬浮窗/停靠面板的 renderBoardTree 与「子代理」tab 共用同一筛选规则。 */
+export function keepRow(row: AgentSnapshotRow, now: number): boolean {
+  return !(row.status === 'finished' && now - row.lastActivity > FINISHED_KEEP_MS)
+}
+
 /** 人类可读的时长。 */
 export function formatDuration(ms: number): string {
   const totalMin = Math.floor(ms / 60_000)
@@ -238,9 +244,7 @@ export function renderBoardTree(opts: {
   const { snapshot, currentId } = opts
   const now = snapshot.now
   // 完成项：保留期（30 分钟）内留在板上，超期自动消失；running 恒保留。
-  const keptRows = snapshot.rows.filter(row => !(
-    row.status === 'finished' && now - row.lastActivity > FINISHED_KEEP_MS
-  ))
+  const keptRows = snapshot.rows.filter(row => keepRow(row, now))
   // 根筛选：无对话的空白会话不显示（含当前会话；`hasMessages` 缺省视为显示，
   // 兼容旧 host）+ 当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
   // 其余历史会话不显示（避免整屏都是 idle 树）。
@@ -318,7 +322,7 @@ export function renderBoardTree(opts: {
 /** 生成一次 RPC 调用的 rpcId。`crypto.randomUUID` 仅在 secure context
  *  （HTTPS / localhost）可用；通过 http://LAN-IP 访问 dsh Web UI 时不可用，
  *  退化为时间戳 + 随机串（与 OpenBiliClaw 的兼容写法一致）。 */
-function newRpcId(): string {
+export function newRpcId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 }
 
