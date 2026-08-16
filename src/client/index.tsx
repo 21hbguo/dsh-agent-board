@@ -164,6 +164,8 @@ const WIDGET_CSS = `
   border-radius: 4px;
 }
 .swd-node:hover { background: rgba(154, 208, 255, 0.12); }
+/* 点击瞬间反馈：跳转渲染前先高亮（打开中） */
+.swd-opening { background: rgba(154, 208, 255, 0.22); }
 .swd-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
 /* 状态色（实心 = 主 agent，空心 = 子代理） */
 .swd-st-running { background: #4ade80; border-color: #4ade80; }
@@ -325,6 +327,8 @@ function renderNode(
     : `点击打开会话 ${row.id}\n行首 ▸/▾ 展开/折叠子树`
   line.addEventListener('click', (e) => {
     e.stopPropagation()
+    // 立即视觉反馈：主线程忙时跳转渲染可能滞后，高亮先让用户知道点中了。
+    line.classList.add('swd-opening')
     onOpen(row.id, row.parentSession)
   })
   const { text, stalled } = statusText(row, threshold)
@@ -508,6 +512,9 @@ class AgentBoardWidget {
   private visibilityCleanup: (() => void) | null = null
   /** 最近一次快照（会话切换时即时重渲染用）。 */
   private lastSnapshot: AgentBoardSnapshot | null = null
+  /** 上次渲染时的 current 会话 id：订阅回调只在 current 变化时重建树，
+   *  减少主线程负担（目录刷新等无关通知不触发 DOM 重建）。 */
+  private lastRenderedCurrent: string | undefined
   /** 用户手动折叠的根（idle 根默认折叠，除非在 expandedRoots）。 */
   private readonly collapsedRoots = new Set<string>()
   /** 用户手动展开的根（覆盖 idle 默认折叠）。 */
@@ -569,9 +576,15 @@ class AgentBoardWidget {
     this.root.appendChild(this.titleBarEl)
     this.root.appendChild(this.bodyEl)
 
-    // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期。
+    // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期；
+    // 只在 current 变化时重建（其他订阅通知不触发，减少主线程负担）。
     this.unsubscribeList = this.ctx.sessions.list.subscribe(() => {
-      if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
+      if (this.lastSnapshot === null) return
+      const current = this.ctx.sessions.list.getSnapshot().current
+      if (current !== this.lastRenderedCurrent) {
+        this.lastRenderedCurrent = current
+        this.render(this.lastSnapshot)
+      }
     })
 
     document.addEventListener(TOGGLE_EVENT, () => {
@@ -728,6 +741,7 @@ class AgentBoardWidget {
   private render(snapshot: AgentBoardSnapshot): void {
     this.offlineEl.style.display = 'none'
     const currentId = this.ctx.sessions.list.getSnapshot().current
+    this.lastRenderedCurrent = currentId
     const now = snapshot.now
     // 完成项：保留期（30 分钟）内留在板上，超期自动消失；running 恒保留。
     const keptRows = snapshot.rows.filter(row => !(
