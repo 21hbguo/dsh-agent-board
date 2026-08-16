@@ -401,7 +401,7 @@ const TAB_CSS = `
   flex-direction: column;
   overflow: hidden;
 }
-.swt-details { flex: none; padding: 4px 8px; min-height: 0; overflow: auto; }
+.swt-details { flex: none; padding: 4px 8px; overflow: visible; }
 .swt-detail-row { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; }
 .swt-detail-label { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); }
 .swt-detail-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -423,7 +423,7 @@ const TAB_CSS = `
   color: var(--dsw-alias-label-secondary, #9aa0a6);
   border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.06));
 }
-.swt-conv-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px; }
+.swt-conv-list { flex: 1; min-height: 0; overflow: visible; padding: 6px 8px; }
 .swt-hint {
   color: var(--dsw-alias-label-secondary, #9aa0a6);
   text-align: center;
@@ -1261,13 +1261,13 @@ class SubagentTabController {
   /** 卡片布局：展开/隐藏、监控卡 ↔ 对话流显隐、按钮文案。 */
   private layoutCard(card: CardEl, row: AgentSnapshotRow): void {
     const expanded = this.expandedId === card.id
-    const convOn = this.convOn.has(card.id)
+    // 对话流只在展开态生效（折叠态卡片是紧凑监控行，内容裁剪不滚动）。
+    const convOn = this.convOn.has(card.id) && expanded
     card.root.classList.toggle('swt-expanded', expanded)
     card.root.classList.toggle('swt-hidden', this.expandedId !== null && !expanded)
     card.collapseBtnEl.style.display = expanded ? '' : 'none'
     card.convBtnEl.textContent = convOn ? '监控' : '对话'
-    // 分屏均分：监控卡 ↔ 对话流二选一；展开聚焦：完整信息 + 对话区同显。
-    card.detailsEl.style.display = convOn && !expanded ? 'none' : ''
+    card.detailsEl.style.display = convOn ? 'none' : ''
     card.convEl.style.display = convOn ? 'flex' : 'none'
     // 卡片状态。
     card.root.classList.toggle('swt-waiting', row.waiting !== undefined)
@@ -1314,8 +1314,17 @@ class SubagentTabController {
   }
 
   private toggleConversation(id: string): void {
-    if (this.convOn.has(id)) this.convOn.delete(id)
-    else {
+    if (this.expandedId === id) {
+      // 已展开：监控卡 ↔ 对话流切换。
+      if (this.convOn.has(id)) this.convOn.delete(id)
+      else {
+        this.convOn.add(id)
+        const card = this.cards.get(id)
+        if (card !== undefined) this.ensureConversation(card)
+      }
+    } else {
+      // 折叠态点「对话」：直接展开聚焦并载入对话流（对话需要空间）。
+      this.expandedId = id
       this.convOn.add(id)
       const card = this.cards.get(id)
       if (card !== undefined) this.ensureConversation(card)
@@ -1665,7 +1674,9 @@ class SubagentTabController {
   private renderConversation(card: CardEl, data: ConversationData): void {
     if (this.disposed || !card.convEl.isConnected) return
     const list = card.convListEl
-    const stick = list.scrollTop + list.clientHeight >= list.scrollHeight - 40
+    // 单滚动条：面板容器滚动，粘底判断与滚动都走 cardsEl。
+    const pane = this.cardsEl
+    const stick = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40
     list.replaceChildren()
     if (data.state === 'loading') {
       list.appendChild(hintLine('加载对话…'))
@@ -1682,6 +1693,6 @@ class SubagentTabController {
       return
     }
     for (const msg of data.messages) list.appendChild(renderMessage(msg))
-    if (stick) list.scrollTop = list.scrollHeight
+    if (stick) pane.scrollTop = pane.scrollHeight
   }
 }
