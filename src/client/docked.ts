@@ -481,6 +481,14 @@ export class DockedAgentBoard {
     this.layout.applyGrid()
   }
 
+  /** 应用字号档位（与悬浮窗共用同一档位，CSS 变量随列继承到树）。 */
+  applyFontSize(size: 'small' | 'medium' | 'large'): void {
+    if (this.col === null) return
+    const preset = size === 'large' ? { font: 13, sub: 12 } : size === 'medium' ? { font: 11, sub: 10 } : { font: 10, sub: 9 }
+    this.col.style.setProperty('--ab-font', `${preset.font}px`)
+    this.col.style.setProperty('--ab-font-sub', `${preset.sub}px`)
+  }
+
   /** 离线提示（App 在传输失败时调用）。 */
   setOffline(offline: boolean): void {
     if (this.offlineEl !== null) this.offlineEl.style.display = offline ? 'block' : 'none'

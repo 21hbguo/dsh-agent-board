@@ -10,7 +10,7 @@
 /** 看板形态：悬浮窗 / 停靠右侧面板 / 两者并存。 */
 export type BoardMode = 'floating' | 'docked' | 'both'
 
-/** 悬浮窗大小档位（宽 × 最大高）。 */
+/** 看板字号档位（主字号 px；辅助元素字号自动降一档）。 */
 export type FloatingSize = 'small' | 'medium' | 'large'
 
 /** 持久化的看板状态（兼容旧版：top/right/visible/collapsed 语义不变）。 */
@@ -28,7 +28,7 @@ export interface BoardState {
   dockedWidth: number
   /** 停靠面板折叠为 0 宽（右侧出现展开按钮）。 */
   dockedCollapsed: boolean
-  /** 悬浮窗大小档位（标题栏 ▭ 按钮调节）。 */
+  /** 看板字号档位（标题栏 ▭ 按钮调节，悬浮窗与停靠面板共用）。 */
   floatingSize: FloatingSize
 }
 
@@ -58,7 +58,7 @@ export const DEFAULT_STATE: BoardState = {
   mode: 'floating',
   dockedWidth: DOCKED_DEFAULT_WIDTH,
   dockedCollapsed: false,
-  floatingSize: 'small',
+  floatingSize: 'medium',
 }
 
 export function loadState(): BoardState {

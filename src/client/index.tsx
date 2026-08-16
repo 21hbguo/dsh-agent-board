@@ -73,7 +73,9 @@ const WIDGET_CSS = `
   max-height: 55vh;
   display: flex;
   flex-direction: column;
-  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--ab-font, 11px);
+  line-height: 1.6;
   color: #e6e6e6;
   background: rgba(17, 17, 20, 0.9);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -88,7 +90,7 @@ const WIDGET_CSS = `
   justify-content: space-between;
   gap: 8px;
   padding: 5px 8px;
-  font-size: 11px;
+  font-size: var(--ab-font, 11px);
   font-weight: 600;
   color: #9ad0ff;
   cursor: grab;
@@ -102,7 +104,7 @@ const WIDGET_CSS = `
   color: #9aa0a6;
   border: none;
   background: none;
-  font-size: 13px;
+  font-size: calc(var(--ab-font, 11px) + 2px);
   line-height: 1;
   padding: 0 4px;
 }
@@ -112,7 +114,7 @@ const WIDGET_CSS = `
   color: #9aa0a6;
   border: none;
   background: none;
-  font-size: 12px;
+  font-size: calc(var(--ab-font, 11px) + 1px);
   line-height: 1;
   padding: 0 4px;
 }
@@ -122,7 +124,7 @@ const WIDGET_CSS = `
   color: #9aa0a6;
   border: none;
   background: none;
-  font-size: 12px;
+  font-size: calc(var(--ab-font, 11px) + 1px);
   line-height: 1;
   padding: 0 4px;
 }
@@ -159,7 +161,7 @@ const WIDGET_CSS = `
 .swd-st-finished.swd-dot-ring { background: rgba(96, 165, 250, 0.45); box-shadow: 0 0 7px rgba(96, 165, 250, 0.7); }
 .swd-st-idle.swd-dot-ring { background: rgba(107, 114, 128, 0.45); box-shadow: 0 0 5px rgba(107, 114, 128, 0.45); }
 .swd-st-stall.swd-dot-ring { background: rgba(248, 113, 113, 0.5); box-shadow: 0 0 7px rgba(248, 113, 113, 0.8); }
-.swd-toggle { cursor: pointer; color: #9aa0a6; font-size: 9px; flex: none; width: 10px; text-align: center; }
+.swd-toggle { cursor: pointer; color: #9aa0a6; font-size: calc(var(--ab-font, 11px) - 2px); flex: none; width: 10px; text-align: center; }
 .swd-toggle:hover { color: #fff; }
 /* 完成态行：整体弱化，突出「已完成」而不抢 running 的注意力 */
 .swd-finished-line { opacity: 0.62; }
@@ -167,7 +169,7 @@ const WIDGET_CSS = `
   color: #0f172a;
   background: #60a5fa;
   border-radius: 3px;
-  font-size: 10px;
+  font-size: var(--ab-font-sub, 10px);
   font-weight: 700;
   padding: 0 4px;
   line-height: 1.4;
@@ -182,7 +184,7 @@ const WIDGET_CSS = `
 /* 答复节选：与状态同行（名字与状态之间），超长省略 */
 .swd-excerpt-inline {
   color: #8b93a1;
-  font-size: 10px;
+  font-size: var(--ab-font-sub, 10px);
   flex: 1;
   min-width: 0;
   margin-left: 8px;
@@ -196,7 +198,7 @@ const WIDGET_CSS = `
   bottom: 20px;
   z-index: 2147483647;
   cursor: pointer;
-  font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: var(--ab-font, 11px) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color: #9ad0ff;
   background: rgba(17, 17, 20, 0.9);
   border: 1px solid rgba(255, 255, 255, 0.14);
@@ -215,7 +217,7 @@ const WIDGET_CSS = `
   background: none;
   padding: 6px 8px;
   width: 100%;
-  font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font: calc(var(--ab-font, 11px) + 1px) ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 .swd-action:hover { color: #e6e6e6; background: rgba(255, 255, 255, 0.06); border-radius: 6px; }
 /* ===== 模式菜单（跟随 shell 主题令牌，缺失时浅色回退在后） ===== */
@@ -283,7 +285,9 @@ const WIDGET_CSS = `
   flex-direction: column;
   min-width: 0;
   overflow: hidden;
-  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--ab-font, 11px);
+  line-height: 1.6;
   color: var(--dsw-alias-label-primary, #e6e6e6);
   background: var(--dsw-alias-bg-layer-1, rgba(17, 17, 20, 0.97));
   border-left: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.12));
@@ -307,7 +311,7 @@ const WIDGET_CSS = `
   color: var(--dsw-alias-label-secondary, #9aa0a6);
   border: none;
   background: none;
-  font-size: 12px;
+  font-size: calc(var(--ab-font, 11px) + 1px);
   line-height: 1;
   padding: 0 4px;
 }
@@ -459,16 +463,16 @@ const MODE_LABELS: Record<BoardMode | 'hidden', string> = {
   hidden: '隐藏',
 }
 
-/** 悬浮窗大小档位：宽度（px）与最大高度（vh）。 */
-const SIZE_PRESETS: Record<FloatingSize, { width: number; maxHeightVh: number; label: string }> = {
-  small: { width: 300, maxHeightVh: 45, label: '小 · 300px' },
-  medium: { width: 420, maxHeightVh: 60, label: '中 · 420px' },
-  large: { width: 560, maxHeightVh: 75, label: '大 · 560px' },
+/** 看板字号档位：主字号（px）与辅助元素字号（px）。 */
+const SIZE_PRESETS: Record<FloatingSize, { font: number; sub: number; label: string }> = {
+  small: { font: 10, sub: 9, label: '小 · 10px' },
+  medium: { font: 11, sub: 10, label: '中 · 11px' },
+  large: { font: 13, sub: 12, label: '大 · 13px' },
 }
 
 const SIZE_MENU_ITEMS: readonly FloatingSize[] = ['small', 'medium', 'large']
 
-/** 在锚点元素下方弹出悬浮窗大小菜单；选择即落盘并广播 SIZE_EVENT。 */
+/** 在锚点元素下方弹出看板字号菜单；选择即落盘并广播 SIZE_EVENT。 */
 function openSizeMenu(anchor: HTMLElement, onClose: () => void): void {
   const current = loadState().floatingSize
   const menu = document.createElement('div')
@@ -592,7 +596,7 @@ class AgentBoardWidget {
     this.root.className = 'swd-widget'
     this.root.style.top = `${this.state.top}px`
     this.root.style.right = `${this.state.right}px`
-    this.applySize(this.state.floatingSize)
+    this.applyFontSize(this.state.floatingSize)
 
     this.titleTextEl = document.createElement('span')
     this.titleTextEl.className = 'swd-title-left'
@@ -610,7 +614,7 @@ class AgentBoardWidget {
     const sizeBtn = document.createElement('span')
     sizeBtn.className = 'swd-size-btn'
     sizeBtn.textContent = '▭'
-    sizeBtn.title = '调节悬浮窗大小（小 / 中 / 大）'
+    sizeBtn.title = '调节看板字号（小 / 中 / 大）'
     sizeBtn.addEventListener('click', (e) => {
       e.stopPropagation()
       this.actions.openSizeMenu(sizeBtn, () => { /* 菜单自行管理关闭 */ })
@@ -690,11 +694,11 @@ class AgentBoardWidget {
     this.bodyEl.style.display = this.state.collapsed ? 'none' : 'block'
   }
 
-  /** 应用悬浮窗大小档位（宽 × 最大高）。 */
-  applySize(size: FloatingSize): void {
+  /** 应用字号档位（CSS 变量，悬浮窗与停靠面板共用同一档位）。 */
+  applyFontSize(size: FloatingSize): void {
     const preset = SIZE_PRESETS[size]
-    this.root.style.width = `${preset.width}px`
-    this.root.style.maxHeight = `${preset.maxHeightVh}vh`
+    this.root.style.setProperty('--ab-font', `${preset.font}px`)
+    this.root.style.setProperty('--ab-font-sub', `${preset.sub}px`)
   }
 
   /** 离线提示（App 在传输失败时调用）。 */
@@ -849,6 +853,8 @@ class AgentBoardApp {
     ensureStyles()
     this.widget.mount()
     this.docked.mount()
+    // 初始字号应用到双形态（悬浮窗构造时已应用，停靠面板在此补上）。
+    this.docked.applyFontSize(this.state.floatingSize)
 
     // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期；
     // 只在 current 变化时重建（其他订阅通知不触发，减少主线程负担）。
@@ -907,12 +913,13 @@ class AgentBoardApp {
     this.sync()
   }) as EventListener
 
-  /** 悬浮窗大小档位变更：落盘 + 应用宽高。 */
+  /** 字号档位变更：落盘 + 应用到悬浮窗与停靠面板。 */
   private readonly onSizeEvent = ((e: CustomEvent<{ size: FloatingSize }>) => {
     if (e.detail.size === undefined) return
     this.state.floatingSize = e.detail.size
     saveState(this.state)
-    this.widget.applySize(e.detail.size)
+    this.widget.applyFontSize(e.detail.size)
+    this.docked.applyFontSize(e.detail.size)
   }) as EventListener
 
   /** 设置总开关并同步双形态。打开时自动展开（清折叠态）——
