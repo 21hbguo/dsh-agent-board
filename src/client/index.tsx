@@ -176,8 +176,12 @@ const WIDGET_CSS = `
 .swd-st-finished { background: #60a5fa; border-color: #60a5fa; }
 /* 主 agent：实心圆（状态色填充） */
 .swd-dot-root { border: 1.5px solid; box-shadow: 0 0 5px rgba(255, 255, 255, 0.25); }
-/* 子代理：空心圆（边框 = 状态色） */
-.swd-dot-ring { background: transparent; border: 1.5px solid; }
+/* 子代理：半透明填充 + 2px 实色描边（颜色面积大、深浅底色都一眼可见） */
+.swd-dot-ring { border: 2px solid; }
+.swd-st-running.swd-dot-ring { background: rgba(74, 222, 128, 0.4); box-shadow: 0 0 6px rgba(74, 222, 128, 0.6); }
+.swd-st-finished.swd-dot-ring { background: rgba(96, 165, 250, 0.45); box-shadow: 0 0 7px rgba(96, 165, 250, 0.7); }
+.swd-st-idle.swd-dot-ring { background: rgba(107, 114, 128, 0.45); box-shadow: 0 0 5px rgba(107, 114, 128, 0.45); }
+.swd-st-stall.swd-dot-ring { background: rgba(248, 113, 113, 0.5); box-shadow: 0 0 7px rgba(248, 113, 113, 0.8); }
 .swd-toggle { cursor: pointer; color: #9aa0a6; font-size: 9px; flex: none; width: 10px; text-align: center; }
 .swd-toggle:hover { color: #fff; }
 /* 完成态行：整体弱化，突出「已完成」而不抢 running 的注意力 */
@@ -237,13 +241,57 @@ const WIDGET_CSS = `
   font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 .swd-action:hover { color: #e6e6e6; background: rgba(255, 255, 255, 0.06); border-radius: 6px; }
+/* ===== 浅色主题（跟随系统 prefers-color-scheme：白底/黑底双适配） ===== */
+@media (prefers-color-scheme: light) {
+  .swd-widget {
+    color: #1f2937;
+    background: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
+  }
+  .swd-title { color: #2563eb; border-bottom: 1px solid rgba(0, 0, 0, 0.08); }
+  .swd-close { color: #6b7280; }
+  .swd-close:hover { color: #111827; }
+  .swd-tree ul { border-left: 1px dashed rgba(37, 99, 235, 0.3); }
+  .swd-node:hover { background: rgba(37, 99, 235, 0.08); }
+  .swd-opening { background: rgba(37, 99, 235, 0.16); }
+  .swd-open-failed { background: rgba(220, 38, 38, 0.14); }
+  /* 浅底用深一号状态色，保证对比度 */
+  .swd-st-running { background: #16a34a; border-color: #16a34a; }
+  .swd-st-idle { background: #6b7280; border-color: #6b7280; }
+  .swd-st-stall { background: #dc2626; border-color: #dc2626; }
+  .swd-st-finished { background: #2563eb; border-color: #2563eb; }
+  .swd-st-running.swd-dot-ring { background: rgba(22, 163, 74, 0.3); box-shadow: 0 0 6px rgba(22, 163, 74, 0.45); }
+  .swd-st-finished.swd-dot-ring { background: rgba(37, 99, 235, 0.32); box-shadow: 0 0 7px rgba(37, 99, 235, 0.5); }
+  .swd-st-idle.swd-dot-ring { background: rgba(107, 114, 128, 0.3); box-shadow: 0 0 5px rgba(107, 114, 128, 0.3); }
+  .swd-st-stall.swd-dot-ring { background: rgba(220, 38, 38, 0.35); box-shadow: 0 0 7px rgba(220, 38, 38, 0.55); }
+  .swd-toggle { color: #6b7280; }
+  .swd-toggle:hover { color: #111827; }
+  .swd-tag { color: #fff; background: #2563eb; }
+  .swd-id { color: #374151; }
+  .swd-id-root { color: #2563eb; }
+  .swd-meta { color: #6b7280; }
+  .swd-stall { color: #dc2626; }
+  .swd-offline { color: #b45309; }
+  .swd-empty { color: #6b7280; }
+  .swd-excerpt-inline { color: #6b7280; }
+  .swd-summon {
+    color: #2563eb;
+    background: rgba(255, 255, 255, 0.94);
+    border: 1px solid rgba(0, 0, 0, 0.12);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  }
+  .swd-summon:hover { color: #1d4ed8; }
+  .swd-action:hover { color: #111827; background: rgba(0, 0, 0, 0.05); }
+}
 `
 
-/** 根筛选窗口：最近活跃（working 或刚结束）的顶层会话才显示，更老的隐藏。 */
-const ROOT_ACTIVE_WINDOW_MS = 30 * 60_000
+/** 根筛选窗口：最近活跃（working 或刚结束）的顶层会话才显示，更老的隐藏。
+ *  10 分钟：闲置项目快速退出看板，避免旧会话堆积。 */
+const ROOT_ACTIVE_WINDOW_MS = 10 * 60_000
 
 /** 完成态保留期：子代理完成后继续保留在板上（父根可见期间可查看），
- *  超时自动消失，避免旧完成节点无限堆积。与根活跃窗口同量级。 */
+ *  超时自动消失，避免旧完成节点无限堆积。 */
 const FINISHED_KEEP_MS = 30 * 60_000
 
 /** 每个根下最多保留的完成态子代理行数（running 不限），防海量堆积。 */
