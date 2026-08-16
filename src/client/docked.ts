@@ -96,6 +96,8 @@ class DockedLayout {
   private dragPointerId = 0
   private dragStartX = 0
   private dragStartWidth = 0
+  private dragRaf: number | null = null
+  private dragLatestWidth = 0
   private instantTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private readonly deps: {
@@ -156,6 +158,11 @@ class DockedLayout {
       clearTimeout(this.instantTimer)
       this.instantTimer = undefined
     }
+    if (this.dragRaf !== null) {
+      cancelAnimationFrame(this.dragRaf)
+      this.dragRaf = null
+    }
+    this.dragging = false
   }
 
   private attach(frame: HTMLElement, col: HTMLDivElement): void {
@@ -253,7 +260,8 @@ class DockedLayout {
     if (grid === this.lastApplied) return
     // 我们自己改轨道（拖拽/折叠/展开）时禁用 shell 的 grid 过渡，
     // 否则 300ms 缓动让把手/内容跟不上指针（aionui 同款处理）。
-    this.instant(frame)
+    // 拖拽期间类由 beginDrag 持续持有（onDragEnd 移除），这里只处理单次操作。
+    if (!this.dragging) this.instant(frame)
     this.lastApplied = grid
     frame.style.gridTemplateColumns = grid
     if (this.col !== null) {
@@ -261,6 +269,7 @@ class DockedLayout {
     }
     const fw = this.frameWidth > 0 ? this.frameWidth : frame.getBoundingClientRect().width
     if (this.handle !== null) {
+      // 把手在面板左边缘：left = 帧宽 - 面板宽，拖拽时跟随指针（见 onDragMove）。
       this.handle.style.left = `${Math.round(fw - width)}px`
       this.handle.style.display = width > 0 ? 'block' : 'none'
     }
@@ -285,6 +294,8 @@ class DockedLayout {
     this.dragPointerId = e.pointerId
     this.dragStartX = e.clientX
     this.dragStartWidth = this.deps.getWidth()
+    // 整个拖拽期间禁用 grid 过渡：逐帧写轨道才不会触发 300ms 缓动追指针。
+    this.frame?.classList.add('swd-instant-grid')
     try {
       (e.currentTarget as Element).setPointerCapture(e.pointerId)
     } catch { /* capture is best-effort */ }
@@ -295,15 +306,31 @@ class DockedLayout {
 
   private readonly onDragMove = (e: PointerEvent): void => {
     if (!this.dragging || e.pointerId !== this.dragPointerId) return
-    const width = Math.min(DOCKED_MAX_WIDTH, Math.max(DOCKED_MIN_WIDTH, this.dragStartWidth + (e.clientX - this.dragStartX)))
-    this.deps.onWidthChange(width)
-    this.applyGrid()
+    // 边缘跟随指针：把手在面板左边缘，往左拖变宽、往右拖变窄，
+    // 把手（left = 帧宽 - 面板宽）始终停留在指针下。
+    const width = Math.min(DOCKED_MAX_WIDTH, Math.max(DOCKED_MIN_WIDTH, this.dragStartWidth + (this.dragStartX - e.clientX)))
+    // rAF 节流：高频 pointermove 合并为每帧一次写，避免一帧内多次整帧 reflow。
+    this.dragLatestWidth = width
+    if (this.dragRaf !== null) return
+    this.dragRaf = requestAnimationFrame(() => {
+      this.dragRaf = null
+      this.deps.onWidthChange(this.dragLatestWidth)
+      this.applyGrid()
+    })
   }
 
   private readonly onDragEnd = (): void => {
     if (!this.dragging) return
     this.dragging = false
+    if (this.dragRaf !== null) {
+      cancelAnimationFrame(this.dragRaf)
+      this.dragRaf = null
+    }
+    // 收尾落定：确保最后一次宽度生效并持久化。
+    this.deps.onWidthChange(this.dragLatestWidth)
+    this.applyGrid()
     window.removeEventListener('pointermove', this.onDragMove)
+    this.frame?.classList.remove('swd-instant-grid')
     this.deps.onWidthCommit()
   }
 
