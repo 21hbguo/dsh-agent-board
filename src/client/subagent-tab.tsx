@@ -33,7 +33,7 @@
  */
 
 import type {
-  ClientContext, ConversationNode, SessionFace, SessionId,
+  ClientContext, ConversationNode, PendingInteraction, SessionFace, SessionId,
 } from '@deepseek-ai/dsh-client-runtime/client'
 // Type-only: pulls the locale plugin's Context merge (ctx.locale).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -99,6 +99,16 @@ interface RpcHistoryEvent {
   }
 }
 
+/** question/requested 帧载荷（AskUserQuestionItem）的最小结构面。 */
+interface QuestionItemLike {
+  readonly id?: string
+  readonly question?: string
+  readonly detail?: string
+  readonly header?: string
+  readonly options?: readonly { readonly label?: string; readonly description?: string }[]
+  readonly multiSelect?: boolean
+}
+
 /** 一张子代理窗格的 DOM 引用。 */
 interface CardEl {
   readonly id: string
@@ -157,21 +167,132 @@ const TAB_CSS = `
   overflow-y: auto;
   padding: 8px 10px;
 }
-.swt-msg { margin-bottom: 8px; max-width: 94%; }
-.swt-msg-user { margin-left: auto; }
-.swt-msg-label { font-size: 10px; color: var(--dsw-alias-label-secondary, #9aa0a6); margin-bottom: 2px; }
+.swt-msg { margin-bottom: 10px; }
+.swt-msg-user { display: flex; flex-direction: column; align-items: flex-end; }
+.swt-msg-label { font-size: 11px; color: var(--dsw-alias-label-secondary, #9aa0a6); margin-bottom: 3px; }
+.swt-msg-user .swt-msg-label { text-align: right; }
+/* 用户消息：右对齐气泡（照对话页 bubble 观感：大圆角、主题底色、有宽度上限） */
 .swt-bubble {
-  padding: 5px 9px;
-  border-radius: 8px;
+  max-width: min(525px, 86%);
+  background: var(--dsw-specific-bubble, rgba(37, 99, 235, 0.16));
+  border-radius: 18px;
+  padding: 8px 14px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--dsw-alias-label-primary, #e6e6e6);
   white-space: pre-wrap;
   word-break: break-word;
-  border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.08));
 }
-.swt-bubble-user {
-  background: rgba(154, 208, 255, 0.12);
-  border-color: rgba(154, 208, 255, 0.25);
+/* 助手消息：整行 markdown 排版（无气泡壳） */
+.swt-md { font-size: 14px; line-height: 1.7; color: var(--dsw-alias-label-primary, #e6e6e6); }
+.swt-md p { margin: 0 0 8px; white-space: pre-wrap; word-break: break-word; }
+.swt-md p:last-child { margin-bottom: 0; }
+.swt-md h1, .swt-md h2, .swt-md h3, .swt-md h4 { margin: 10px 0 6px; font-weight: 700; line-height: 1.4; }
+.swt-md h1 { font-size: 18px; }
+.swt-md h2 { font-size: 16px; }
+.swt-md h3 { font-size: 15px; }
+.swt-md h4 { font-size: 14px; }
+.swt-md pre {
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.1));
+  border-radius: 8px;
+  padding: 8px 10px;
+  overflow-x: auto;
+  margin: 6px 0;
 }
-.swt-bubble-assistant { background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.05)); }
+.swt-md pre code {
+  background: none;
+  padding: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  white-space: pre;
+}
+.swt-md code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.08));
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+.swt-md strong { font-weight: 700; }
+.swt-md em { font-style: italic; }
+.swt-md blockquote {
+  margin: 6px 0;
+  padding: 2px 10px;
+  border-left: 3px solid var(--dsw-alias-border-l2, rgba(154, 208, 255, 0.4));
+  color: var(--dsw-alias-label-secondary, #9aa0a6);
+}
+.swt-md ul, .swt-md ol { margin: 4px 0 8px; padding-left: 22px; }
+.swt-md li { margin: 2px 0; }
+.swt-md a { color: var(--dsw-alias-brand-primary, #9ad0ff); text-decoration: underline; }
+.swt-md hr { border: none; border-top: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.12)); margin: 8px 0; }
+.swt-md del { text-decoration: line-through; }
+/* 底部交互区：等待人工的提问/审批卡片（照对话页 composer 占位位置） */
+.swt-left-interact {
+  flex: none;
+  max-height: 45%;
+  overflow-y: auto;
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.1));
+  background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.03));
+}
+.swt-qcard, .swt-acard {
+  border: 1px solid #fbbf24;
+  border-radius: 10px;
+  background: rgba(251, 191, 36, 0.08);
+  padding: 8px 10px;
+}
+.swt-qcard-head, .swt-acard-head { font-weight: 700; color: #fbbf24; margin-bottom: 4px; }
+.swt-qcard-q { font-weight: 600; margin: 4px 0 2px; word-break: break-word; }
+.swt-qcard-detail { color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 12px; white-space: pre-wrap; word-break: break-word; margin-bottom: 4px; }
+.swt-qcard-option {
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.14));
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.04));
+  color: var(--dsw-alias-label-primary, #e6e6e6);
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin: 3px 0;
+  font: inherit;
+  font-size: 13px;
+}
+.swt-qcard-option:hover { border-color: var(--dsw-alias-brand-primary, #9ad0ff); }
+.swt-qcard-option.selected { border-color: #fbbf24; background: rgba(251, 191, 36, 0.15); }
+.swt-qcard-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.14));
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.04));
+  color: var(--dsw-alias-label-primary, #e6e6e6);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 13px;
+  margin-top: 4px;
+}
+.swt-qcard-actions, .swt-acard-actions { display: flex; gap: 8px; margin-top: 6px; justify-content: flex-end; }
+.swt-qcard-btn, .swt-acard-btn {
+  cursor: pointer;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.16));
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.05));
+  color: var(--dsw-alias-label-primary, #e6e6e6);
+  border-radius: 6px;
+  padding: 3px 12px;
+  font: inherit;
+  font-size: 13px;
+}
+.swt-qcard-btn:hover, .swt-acard-btn:hover { border-color: var(--dsw-alias-brand-primary, #9ad0ff); }
+.swt-qcard-btn:disabled, .swt-acard-btn:disabled { opacity: 0.5; cursor: default; }
+.swt-qcard-primary, .swt-acard-primary { border-color: #fbbf24; color: #fbbf24; font-weight: 600; }
+.swt-qcard-primary:hover, .swt-acard-primary:hover { background: rgba(251, 191, 36, 0.15); }
+.swt-qcard-err, .swt-acard-err { color: #f87171; font-size: 12px; margin-top: 4px; word-break: break-word; }
+.swt-acard-headline { white-space: pre-wrap; word-break: break-word; }
 .swt-divider {
   flex: none;
   width: 6px;
@@ -319,9 +440,25 @@ const TAB_CSS = `
   .swt-left-head { color: var(--dsw-alias-brand-primary, #2563eb); }
   .swt-left-head-id { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-msg-label { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swt-bubble { border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.1)); }
-  .swt-bubble-user { background: rgba(37, 99, 235, 0.08); border-color: rgba(37, 99, 235, 0.22); }
-  .swt-bubble-assistant { background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04)); }
+  .swt-bubble { border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.1)); background: var(--dsw-specific-bubble, rgba(37, 99, 235, 0.08)); }
+  .swt-md { color: var(--dsw-alias-label-primary, #1f2937); }
+  .swt-md pre { background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.04)); border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.1)); }
+  .swt-md code { background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.06)); }
+  .swt-md blockquote { border-left-color: var(--dsw-alias-border-l2, rgba(37, 99, 235, 0.35)); color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swt-md a { color: var(--dsw-alias-brand-primary, #2563eb); }
+  .swt-left-interact { border-top-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.1)); background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.7)); }
+  .swt-qcard, .swt-acard { border-color: #d97706; background: rgba(217, 119, 6, 0.08); }
+  .swt-qcard-head, .swt-acard-head { color: #b45309; }
+  .swt-qcard-detail { color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swt-qcard-option { border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.14)); background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.03)); color: var(--dsw-alias-label-primary, #1f2937); }
+  .swt-qcard-option:hover { border-color: var(--dsw-alias-brand-primary, #2563eb); }
+  .swt-qcard-option.selected { border-color: #d97706; background: rgba(217, 119, 6, 0.12); }
+  .swt-qcard-input { border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.14)); background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.03)); color: var(--dsw-alias-label-primary, #1f2937); }
+  .swt-qcard-btn, .swt-acard-btn { border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.16)); background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.03)); color: var(--dsw-alias-label-primary, #1f2937); }
+  .swt-qcard-btn:hover, .swt-acard-btn:hover { border-color: var(--dsw-alias-brand-primary, #2563eb); }
+  .swt-qcard-primary, .swt-acard-primary { border-color: #d97706; color: #b45309; }
+  .swt-qcard-primary:hover, .swt-acard-primary:hover { background: rgba(217, 119, 6, 0.1); }
+  .swt-qcard-err, .swt-acard-err { color: #dc2626; }
   .swt-divider::after { background: var(--dsw-alias-border-l2, rgba(37, 99, 235, 0.3)); }
   .swt-divider:hover::after, .swt-divider.swt-dragging::after { background: var(--dsw-alias-brand-primary, rgba(37, 99, 235, 0.65)); }
   .swt-right-head { color: var(--dsw-alias-brand-primary, #2563eb); }
@@ -427,19 +564,158 @@ async function fetchSessionHistory(sessionId: string): Promise<TextMessage[] | n
   }
 }
 
-/** 一条消息气泡。 */
-function messageBubble(msg: TextMessage): HTMLDivElement {
+/** HTML 转义（markdown 渲染的注入安全基础：先转义再变换）。 */
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/** 链接白名单：仅 http(s)/mailto/相对路径，防止 javascript: 注入。 */
+const SAFE_URL = /^(https?:|mailto:|\/|#|\.)/i
+
+/** 行内 markdown：行内代码（先占位保护）→ 加粗 → 斜体 → 删除线 → 链接。 */
+function inlineMarkdown(escaped: string): string {
+  const codes: string[] = []
+  let out = escaped.replace(/`([^`\n]+)`/g, (_m, code: string) => {
+    codes.push(code)
+    return `\u0001${codes.length - 1}\u0001`
+  })
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  out = out.replace(/\*([^*]+)\*/g, '<em>$1</em>')
+  out = out.replace(/~~([^~]+)~~/g, '<del>$1</del>')
+  out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label: string, url: string) => {
+    if (!SAFE_URL.test(url)) return m
+    return `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`
+  })
+  out = out.replace(/\u0001(\d+)\u0001/g, (_m, i: string) => `<code>${codes[Number(i)] ?? ''}</code>`)
+  return out
+}
+
+/** 轻量 markdown → DOM（自绘对话流用；块级：代码围栏/标题/引用/列表/分隔线/段落）。 */
+function renderMarkdown(text: string): HTMLDivElement {
+  const root = document.createElement('div')
+  root.className = 'swt-md'
+  const lines = text.split('\n')
+  let para: string[] = []
+  let inCode = false
+  let codeBuf: string[] = []
+  let listKind: 'ul' | 'ol' | null = null
+  let listEl: HTMLUListElement | HTMLOListElement | null = null
+  const closeList = (): void => { listKind = null; listEl = null }
+  const flushPara = (): void => {
+    closeList()
+    if (para.length === 0) return
+    const p = document.createElement('p')
+    p.innerHTML = inlineMarkdown(para.join('\n'))
+    root.appendChild(p)
+    para = []
+  }
+  const openList = (kind: 'ul' | 'ol'): void => {
+    listKind = kind
+    listEl = document.createElement(kind === 'ul' ? 'ul' : 'ol')
+    root.appendChild(listEl)
+  }
+  const addItem = (kind: 'ul' | 'ol', content: string): void => {
+    if (listKind !== kind || listEl === null) openList(kind)
+    const li = document.createElement('li')
+    li.innerHTML = inlineMarkdown(content)
+    listEl!.appendChild(li)
+  }
+  for (const raw of lines) {
+    const line = raw.replace(/\s+$/u, '')
+    const fence = /^```(.*)$/u.exec(line)
+    if (fence !== null) {
+      if (inCode) {
+        // 闭合围栏。
+        const pre = document.createElement('pre')
+        const code = document.createElement('code')
+        code.textContent = codeBuf.join('\n')
+        pre.appendChild(code)
+        root.appendChild(pre)
+        inCode = false
+        codeBuf = []
+      } else {
+        flushPara()
+        inCode = true
+        codeBuf = []
+      }
+      continue
+    }
+    if (inCode) {
+      codeBuf.push(raw)
+      continue
+    }
+    const heading = /^(#{1,6})\s+(.*)$/u.exec(line)
+    if (heading !== null) {
+      flushPara()
+      const hd = document.createElement(`h${heading[1]!.length}` as 'h1')
+      hd.innerHTML = inlineMarkdown(heading[2]!)
+      root.appendChild(hd)
+      continue
+    }
+    const quote = /^>\s?(.*)$/u.exec(line)
+    if (quote !== null) {
+      flushPara()
+      const bq = document.createElement('blockquote')
+      bq.innerHTML = inlineMarkdown(quote[1]!)
+      root.appendChild(bq)
+      continue
+    }
+    const ul = /^\s*[-*]\s+(.*)$/u.exec(line)
+    if (ul !== null) {
+      addItem('ul', ul[1]!)
+      continue
+    }
+    const ol = /^\s*\d+[.)]\s+(.*)$/u.exec(line)
+    if (ol !== null) {
+      addItem('ol', ol[1]!)
+      continue
+    }
+    if (/^\s*(?:---+|\*\*\*+)\s*$/u.test(line)) {
+      flushPara()
+      root.appendChild(document.createElement('hr'))
+      continue
+    }
+    if (line.trim() === '') {
+      flushPara()
+      continue
+    }
+    closeList()
+    para.push(line)
+  }
+  if (inCode) {
+    // 未闭合围栏：按代码块收尾。
+    const pre = document.createElement('pre')
+    const code = document.createElement('code')
+    code.textContent = codeBuf.join('\n')
+    pre.appendChild(code)
+    root.appendChild(pre)
+  } else {
+    flushPara()
+  }
+  return root
+}
+
+/** 一条对话消息（照对话页观感：用户右对齐气泡，助手整行 markdown）。 */
+function renderMessage(msg: TextMessage): HTMLDivElement {
   const wrap = document.createElement('div')
-  wrap.className = `swt-msg ${msg.role === 'user' ? 'swt-msg-user' : ''}`
+  wrap.className = `swt-msg swt-msg-${msg.role}`
   const label = document.createElement('div')
   label.className = 'swt-msg-label'
   const time = msg.time > 0 ? new Date(msg.time).toLocaleTimeString() : ''
   label.textContent = msg.role === 'user' ? `你 · ${time}` : `助手 · ${time}`
-  const bubble = document.createElement('div')
-  bubble.className = `swt-bubble swt-bubble-${msg.role}`
-  bubble.textContent = msg.text
   wrap.appendChild(label)
-  wrap.appendChild(bubble)
+  if (msg.role === 'user') {
+    const bubble = document.createElement('div')
+    bubble.className = 'swt-bubble'
+    bubble.textContent = msg.text
+    wrap.appendChild(bubble)
+  } else {
+    wrap.appendChild(renderMarkdown(msg.text))
+  }
   return wrap
 }
 
@@ -502,6 +778,7 @@ class SubagentTabController {
   private readonly root: HTMLDivElement
   private readonly leftHeadIdEl: HTMLSpanElement
   private readonly leftBodyEl: HTMLDivElement
+  private readonly interactEl: HTMLDivElement
   private readonly rightHeadCountEl: HTMLSpanElement
   private readonly cardsEl: HTMLDivElement
   private readonly offlineEl: HTMLDivElement
@@ -526,6 +803,10 @@ class SubagentTabController {
   private leftWidth = 0
   /** 左栏是否粘底（有新消息自动滚到底）。 */
   private leftStickBottom = true
+  /** 提问卡选项选中态：`${wait.key}:${questionId}` → 已选 label 集合。 */
+  private readonly questionSel = new Map<string, Set<string>>()
+  /** 无选项提问的自由文本输入：`${wait.key}:${questionId}` → input。 */
+  private readonly questionInputs = new Map<string, HTMLInputElement>()
 
   private timer: number | undefined
   private fetching = false
@@ -561,8 +842,11 @@ class SubagentTabController {
     leftHead.appendChild(this.leftHeadIdEl)
     this.leftBodyEl = document.createElement('div')
     this.leftBodyEl.className = 'swt-left-body'
+    this.interactEl = document.createElement('div')
+    this.interactEl.className = 'swt-left-interact'
     left.appendChild(leftHead)
     left.appendChild(this.leftBodyEl)
+    left.appendChild(this.interactEl)
 
     this.dividerEl = document.createElement('div')
     this.dividerEl.className = 'swt-divider'
@@ -1082,10 +1366,14 @@ class SubagentTabController {
   }
 
   private renderLeftFromSession(session: SessionFace): void {
-    this.renderLeftMessages(collectMessages(session.getSnapshot().nodes))
+    const snap = session.getSnapshot()
+    this.renderLeftMessages(collectMessages(snap.nodes), snap.pending)
   }
 
-  private renderLeftMessages(messages: readonly TextMessage[]): void {
+  private renderLeftMessages(
+    messages: readonly TextMessage[],
+    pending?: readonly PendingInteraction[],
+  ): void {
     if (this.disposed) return
     const el = this.leftBodyEl
     const stick = this.leftStickBottom || el.scrollTop + el.clientHeight >= el.scrollHeight - 80
@@ -1093,20 +1381,237 @@ class SubagentTabController {
     if (messages.length === 0) {
       el.appendChild(hintLine('该会话暂无对话消息'))
       this.leftStickBottom = true
-      return
-    }
-    for (const msg of messages) el.appendChild(messageBubble(msg))
-    if (stick) {
-      this.leftStickBottom = true
-      el.scrollTop = el.scrollHeight
     } else {
-      this.leftStickBottom = false
+      for (const msg of messages) el.appendChild(renderMessage(msg))
+      if (stick) {
+        this.leftStickBottom = true
+        el.scrollTop = el.scrollHeight
+      } else {
+        this.leftStickBottom = false
+      }
     }
+    // 等待人工的提问/审批卡（照对话页 composer 占位位置：对话流下方）。
+    this.renderInteractions(pending ?? [])
   }
 
   private renderLeftHint(text: string): void {
     if (this.disposed) return
     this.leftBodyEl.replaceChildren(hintLine(text))
+    this.renderInteractions([])
+  }
+
+  // ------------------------------------------------------------ 等待人工卡片
+
+  private renderInteractions(pending: readonly PendingInteraction[]): void {
+    if (this.disposed) return
+    this.interactEl.replaceChildren()
+    if (pending.length === 0) {
+      this.interactEl.style.display = 'none'
+      // 清理已结算 wait 的选中态/输入（防泄漏）。
+      const live = new Set(pending.map(w => w.key))
+      for (const key of this.questionSel.keys()) {
+        if (![...live].some(l => key.startsWith(l))) this.questionSel.delete(key)
+      }
+      for (const key of this.questionInputs.keys()) {
+        if (![...live].some(l => key.startsWith(l))) this.questionInputs.delete(key)
+      }
+      return
+    }
+    this.interactEl.style.display = 'flex'
+    for (const wait of pending) {
+      if (wait.kind === 'question') this.interactEl.appendChild(this.renderQuestionCard(wait))
+      else if (wait.kind === 'approval') this.interactEl.appendChild(this.renderApprovalCard(wait))
+    }
+  }
+
+  /** 提问卡：问题/详情/选项（单选或多选）/自由文本 + 提交/取消（应答协议照 ui-user-questions）。 */
+  private renderQuestionCard(wait: Extract<PendingInteraction, { kind: 'question' }>): HTMLDivElement {
+    const payload = wait.payload as { readonly questions?: readonly QuestionItemLike[] }
+    const items = payload.questions ?? []
+    const card = document.createElement('div')
+    card.className = 'swt-qcard'
+    const head = document.createElement('div')
+    head.className = 'swt-qcard-head'
+    head.textContent = '❓ 等待你的判断'
+    const body = document.createElement('div')
+    body.className = 'swt-qcard-body'
+    const errEl = document.createElement('div')
+    errEl.className = 'swt-qcard-err'
+    errEl.style.display = 'none'
+    const actions = document.createElement('div')
+    actions.className = 'swt-qcard-actions'
+    const submit = document.createElement('button')
+    submit.type = 'button'
+    submit.className = 'swt-qcard-btn swt-qcard-primary'
+    submit.textContent = '提交'
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.className = 'swt-qcard-btn'
+    cancel.textContent = '取消'
+    actions.appendChild(submit)
+    actions.appendChild(cancel)
+    card.appendChild(head)
+    card.appendChild(body)
+    card.appendChild(errEl)
+    card.appendChild(actions)
+
+    const busy = (b: boolean): void => {
+      submit.disabled = b
+      cancel.disabled = b
+    }
+    // 每道题：选项按钮（multiSelect 可多选）或自由文本输入。
+    for (const item of items) {
+      const qEl = document.createElement('div')
+      qEl.className = 'swt-qcard-item'
+      const title = document.createElement('div')
+      title.className = 'swt-qcard-q'
+      const questionText = item.question ?? ''
+      title.textContent = item.header !== undefined && item.header !== ''
+        ? `${item.header}：${questionText}`
+        : questionText
+      qEl.appendChild(title)
+      if (item.detail !== undefined && item.detail !== '') {
+        const d = document.createElement('div')
+        d.className = 'swt-qcard-detail'
+        d.textContent = item.detail
+        qEl.appendChild(d)
+      }
+      const opts = item.options ?? []
+      const selKey = `${wait.key}:${item.id ?? '?'}`
+      let sel = this.questionSel.get(selKey)
+      if (sel === undefined) {
+        sel = new Set()
+        this.questionSel.set(selKey, sel)
+      }
+      if (opts.length === 0) {
+        const input = document.createElement('input')
+        input.type = 'text'
+        input.className = 'swt-qcard-input'
+        input.placeholder = '输入你的回答…'
+        qEl.appendChild(input)
+        this.questionInputs.set(selKey, input)
+      } else {
+        const optionEls: HTMLButtonElement[] = []
+        const refresh = (): void => {
+          for (const oEl of optionEls) {
+            oEl.classList.toggle('selected', sel!.has(oEl.dataset.label ?? ''))
+          }
+          submit.disabled = items.every(it => {
+            const s = this.questionSel.get(`${wait.key}:${it.id ?? '?'}`)
+            return (s === undefined || s.size === 0)
+          })
+        }
+        for (const opt of opts) {
+          const b = document.createElement('button')
+          b.type = 'button'
+          b.className = 'swt-qcard-option'
+          b.dataset.label = opt.label ?? ''
+          b.textContent = opt.label ?? ''
+          if (opt.description !== undefined) b.title = opt.description
+          b.addEventListener('click', () => {
+            const label = opt.label ?? ''
+            if (item.multiSelect === true) {
+              if (sel!.has(label)) sel!.delete(label)
+              else sel!.add(label)
+            } else {
+              sel!.clear()
+              sel!.add(label)
+            }
+            refresh()
+          })
+          optionEls.push(b)
+          qEl.appendChild(b)
+        }
+        refresh()
+      }
+      body.appendChild(qEl)
+    }
+    submit.addEventListener('click', () => {
+      busy(true)
+      errEl.style.display = 'none'
+      const answers = items.map(it => {
+        const key = `${wait.key}:${it.id ?? '?'}`
+        const s = this.questionSel.get(key)
+        const input = this.questionInputs.get(key)
+        return {
+          id: it.id ?? '',
+          selected: s !== undefined ? [...s] : [],
+          ...(input !== undefined && input.value.trim() !== '' ? { custom: input.value.trim() } : {}),
+        }
+      })
+      void wait.respond({ ok: true, value: { sessionId: wait.sessionId, answer: { answers } } })
+        .catch((e: unknown) => {
+          busy(false)
+          errEl.textContent = `提交失败：${e instanceof Error ? e.message : String(e)}`
+          errEl.style.display = 'block'
+        })
+    })
+    cancel.addEventListener('click', () => {
+      busy(true)
+      errEl.style.display = 'none'
+      void wait.respond({
+        ok: false,
+        error: { code: 'cancelled', message: '用户取消了提问', details: {} },
+      }).catch((e: unknown) => {
+        busy(false)
+        errEl.textContent = `取消失败：${e instanceof Error ? e.message : String(e)}`
+        errEl.style.display = 'block'
+      })
+    })
+    return card
+  }
+
+  /** 审批卡：理由/工具名 + 允许一次/拒绝（应答协议照 ui-conversation ApprovalPanel）。 */
+  private renderApprovalCard(wait: Extract<PendingInteraction, { kind: 'approval' }>): HTMLDivElement {
+    const payload = wait.payload as {
+      readonly toolName?: string
+      readonly reason?: string
+      readonly approvalId?: string
+    }
+    const card = document.createElement('div')
+    card.className = 'swt-acard'
+    const head = document.createElement('div')
+    head.className = 'swt-acard-head'
+    head.textContent = '⏳ 等待批准'
+    const headline = document.createElement('div')
+    headline.className = 'swt-acard-headline'
+    headline.textContent = payload.reason ?? `请求批准执行工具 ${payload.toolName ?? ''}`
+    const errEl = document.createElement('div')
+    errEl.className = 'swt-acard-err'
+    errEl.style.display = 'none'
+    const actions = document.createElement('div')
+    actions.className = 'swt-acard-actions'
+    const reject = document.createElement('button')
+    reject.type = 'button'
+    reject.className = 'swt-acard-btn'
+    reject.textContent = '拒绝'
+    const allow = document.createElement('button')
+    allow.type = 'button'
+    allow.className = 'swt-acard-btn swt-acard-primary'
+    allow.textContent = '允许一次'
+    actions.appendChild(reject)
+    actions.appendChild(allow)
+    card.appendChild(head)
+    card.appendChild(headline)
+    card.appendChild(errEl)
+    card.appendChild(actions)
+    const answer = (outcome: 'allowed-once' | 'rejected'): void => {
+      reject.disabled = true
+      allow.disabled = true
+      errEl.style.display = 'none'
+      void wait.respond({
+        ok: true,
+        value: { sessionId: wait.sessionId, approvalId: payload.approvalId ?? '', outcome },
+      }).catch((e: unknown) => {
+        reject.disabled = false
+        allow.disabled = false
+        errEl.textContent = `应答失败：${e instanceof Error ? e.message : String(e)}`
+        errEl.style.display = 'block'
+      })
+    }
+    reject.addEventListener('click', () => answer('rejected'))
+    allow.addEventListener('click', () => answer('allowed-once'))
+    return card
   }
 
   /** 子代理对话流：binding 订阅 → session.history RPC → lastReply 兜底。 */
@@ -1176,7 +1681,7 @@ class SubagentTabController {
       list.appendChild(hintLine('该子代理暂无对话消息'))
       return
     }
-    for (const msg of data.messages) list.appendChild(messageBubble(msg))
+    for (const msg of data.messages) list.appendChild(renderMessage(msg))
     if (stick) list.scrollTop = list.scrollHeight
   }
 }
