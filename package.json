@@ -22,6 +22,16 @@
     "./package.json": "./package.json"
   },
   "license": "BSD-3-Clause",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "cordis",
+    "deepseek-harness",
+    "agent-board",
+    "subagent",
+    "monitoring",
+    "dashboard"
+  ],
   "peerDependencies": {
     "cordis": ">=4.0.0-rc <5",
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
