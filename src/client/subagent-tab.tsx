@@ -3,9 +3,12 @@
  *
  * 布局：左侧 = 当前主 agent 会话的完整对话流（markdown 文本消息，只读 +
  * 底部等待人工交互区）；右侧 = 该会话直属子代理（parentSession === sessionId
- * 且 depth === 1）的「agent 容器」列表——每个容器固定高度（均分）、内部滚动，
- * 内容 = 该子代理自己的真实对话流（markdown）+ 该子代理挂起的提问/审批卡。
- * 中间一条可拖拽分隔条（左宽右窄，宽度持久化 localStorage
+ * 且 depth === 1）的「agent 容器」列表——每子代理一个容器，垂直排列，右侧
+ * 面板整体单滚动条；每个容器 = 完整对话页观感：容器头部一行（标题 + 状态
+ * 色点 + 「跳转」按钮），正文 = 该子代理自己的真实对话流（用户消息右对齐
+ * 气泡、助手消息 markdown 含代码块、工具调用摘要行）+ 挂起提问/审批卡，
+ * 底部 = 该容器的输入框（点击容器任意处即聚焦其输入框，Enter/按钮发送给
+ * 该子代理）。中间一条可拖拽分隔条（左宽右窄，宽度持久化 localStorage
  * `dsh.agentBoard.tabSplit.v1`，向右拖 = 左变宽）。
  *
  * 数据流：挂载即拉 `GET /api/agent-board/agents` + 2s 轮询 + SSE
@@ -15,12 +18,16 @@
  *
  * 筛选复用 tree.ts 规则：finished 超 30 分钟剔除（keepRow）、每会话最多
  * 12 条 finished（快照序 = 创建时间新→旧）；running 恒显示；waiting
- * （等待人工）整卡黄色高亮。
+ * （等待人工）整卡黄色高亮 + 头部黄点。
  *
  * 对话渲染：主会话走 binding（ctx.sessions.binding → snapshot.nodes 文本消息，
  * 可订阅实时更新）；子代理会话无 binding（eligible 仅限 current/列表内），
- * 走 host RPC `POST /api/session.history`（result.value.events 的
- * user/assistant/message 文本）+ 活动变化节流刷新。
+ * 走 host RPC `POST /api/session.history`（result.value.events：
+ * user/assistant/message 文本、tool/call 工具摘要）+ 活动变化节流刷新（4s）。
+ *
+ * 发送：`POST /api/session.prompt` client-request 帧
+ * （{sessionId:<子代理id>, mode:'queue', content:[{type:'text',text}]}）——
+ * 成功清空输入框并立即重拉该容器对话（排队消息被认领后即出现于 history）。
  *
  * 原地应答：挂起提问/审批经 mux 流 `GET /api/events.mux`（SSE，连接即重放
  * 全部挂起帧、rpcId 稳定）维护注册表，应答走 `POST /api/respond`
@@ -28,9 +35,8 @@
  * ui-conversation ApprovalPanel）。快照 pending 缺失时从 action.text
  * （ask_user_question: {json}）解析提问内容兜底展示。
  *
- * 交互：卡片头 = 状态点/标题/状态/静默/等待高亮 + 「跳转」按钮
- * （openBoardSession，复用 tree.ts，含已读标记）；无展开交互——每个
- * agent 容器直接就是可读可答的对话。
+ * 交互：无监控详情、无展开聚焦、无监控/对话切换——每个 agent 容器直接
+ * 就是可读可答的对话；点击容器（头部或正文）聚焦其输入框。
  *
  * 全部渲染为 plain DOM（与悬浮窗/停靠面板同风格），仅入口是薄 React 壳
  * （conversation.view 槽位组件必须是 React 组件）。
@@ -55,8 +61,6 @@ import { useEffect, useRef } from 'react'
 import type { AgentBoardSnapshot, AgentSnapshotRow } from '../index.js'
 import { en, NS, zh } from './locales.js'
 import {
-  formatDuration,
-  isViewed,
   keepRow,
   markViewed,
   newRpcId,
@@ -84,12 +88,21 @@ const CLICK_MOVE_PX = 4
 /** 子代理对话流刷新节流（ms）：活动变化后至少间隔这么久才重拉 history。 */
 const CARD_REFRESH_MIN_MS = 4000
 
-/** 一条纯文本对话消息（自绘轻量对话用）。 */
+/** 一条纯文本对话消息（左栏主会话对话用）。 */
 interface TextMessage {
   readonly role: 'user' | 'assistant'
   readonly text: string
   readonly time: number
 }
+
+/**
+ * 一条子代理对话流条目（右栏 agent 容器正文）：文本消息 + 工具调用摘要行。
+ * tool 条目来自 session.history 的 tool/call 事件（data.name + data.arguments）。
+ */
+type ConvItem =
+  | { readonly kind: 'user'; readonly text: string; readonly time: number }
+  | { readonly kind: 'assistant'; readonly text: string; readonly time: number }
+  | { readonly kind: 'tool'; readonly name: string; readonly summary: string; readonly time: number }
 
 /** session.history 事件的最小结构面（与 host SessionEventLike 一致）。 */
 interface RpcHistoryEvent {
@@ -97,7 +110,35 @@ interface RpcHistoryEvent {
   readonly seq?: number
   readonly time?: number
   readonly data?: {
-    readonly message?: { readonly content?: readonly { readonly type?: string; readonly text?: string }[] }
+    /** tool/call 直接字段（宿主持久事件：无 message.content）。 */
+    readonly name?: string
+    /** tool/call 原始 arguments JSON 字符串（模型原样产出）。 */
+    readonly arguments?: string
+    /**
+     * user/message 的正文在 data.content 直接挂载（派生历史形状）；
+     * assistant/message 则走 data.message.content——两处都要兼容。
+     */
+    readonly content?: readonly {
+      readonly type?: string
+      readonly text?: string
+      /** tool_use / tool-call 块（防御性：某些事件把工具调用放进 content）。 */
+      readonly id?: string
+      readonly name?: string
+      readonly arguments?: string
+      readonly input?: unknown
+    }[]
+    readonly message?: {
+      readonly content?: readonly {
+        readonly type?: string
+        readonly text?: string
+        readonly id?: string
+        readonly name?: string
+        readonly arguments?: string
+        readonly input?: unknown
+      }[]
+    }
+    /** tool/call 事件的调用 id（与 content 块的 id 一致，用于去重）。 */
+    readonly callId?: string
   }
 }
 
@@ -130,22 +171,18 @@ type PendingResult =
   | { ok: true; value: unknown }
   | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
 
-/** 一张子代理窗格的 DOM 引用。 */
+/** 一个子代理容器（对话页观感 + 底部输入框）的 DOM 引用。 */
 interface CardEl {
   readonly id: string
   readonly root: HTMLDivElement
   readonly dotEl: HTMLSpanElement
   readonly titleEl: HTMLSpanElement
-  readonly idEl: HTMLSpanElement
-  readonly statusEl: HTMLSpanElement
-  readonly silentEl: HTMLSpanElement
-  readonly convBtnEl: HTMLButtonElement
   readonly openBtnEl: HTMLButtonElement
-  readonly collapseBtnEl: HTMLButtonElement
   readonly bodyEl: HTMLDivElement
-  readonly detailsEl: HTMLDivElement
-  readonly convEl: HTMLDivElement
   readonly convListEl: HTMLDivElement
+  readonly inputEl: HTMLInputElement
+  readonly sendBtnEl: HTMLButtonElement
+  readonly errEl: HTMLDivElement
 }
 
 /** 一个可应答的挂起交互（快照 PendingWait 与 mux 帧的统一面）。 */
@@ -365,32 +402,28 @@ const TAB_CSS = `
   white-space: nowrap;
 }
 .swt-right-head-hint { color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 10px; font-weight: 400; }
-/* 右侧 = 子代理「agent 容器」列表：每容器固定高度均分、内部滚动 */
+/* 右侧 = 子代理「agent 容器」列表：垂直排列，右侧面板整体单滚动条 */
 .swt-cards {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 6px 8px;
+  gap: 8px;
+  padding: 6px 8px 10px;
 }
 .swt-card {
-  flex: 1 1 0;
-  min-height: 0;
+  flex: none;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.1));
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.03));
   overflow: hidden;
-  cursor: pointer;
 }
 .swt-card:hover { border-color: var(--dsw-alias-border-l2, rgba(154, 208, 255, 0.4)); }
-/* 单击展开聚焦：占满右侧（其余卡隐藏）；再点/收起返回分屏均分 */
-.swt-card.swt-expanded { flex: 1 1 auto; }
-.swt-card.swt-hidden { display: none; }
-.swt-card.swt-finished { opacity: 0.78; }
+/* 输入框聚焦中的容器：品牌色描边（点击容器聚焦输入框的可见反馈） */
+.swt-card:focus-within { border-color: var(--dsw-alias-brand-primary, rgba(154, 208, 255, 0.75)); }
 .swt-card.swt-waiting {
   border-color: #fbbf24;
   background: rgba(251, 191, 36, 0.09);
@@ -400,7 +433,7 @@ const TAB_CSS = `
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px;
+  padding: 5px 8px;
   border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.08));
   white-space: nowrap;
 }
@@ -411,18 +444,6 @@ const TAB_CSS = `
 .swt-st-finished { background: #60a5fa; }
 .swt-st-waiting { background: #fbbf24; }
 .swt-card-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-.swt-card-id { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 10px; }
-.swt-card-status {
-  flex: none;
-  max-width: 34%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--dsw-alias-label-secondary, #9aa0a6);
-  font-size: 11px;
-}
-.swt-card-status.swt-stall { color: #f87171; font-weight: 700; }
-.swt-card-status.swt-waiting-val { color: #fbbf24; }
-.swt-card-silent { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 11px; }
 .swt-card-btn {
   flex: none;
   cursor: pointer;
@@ -440,29 +461,91 @@ const TAB_CSS = `
 .swt-card-btn.swt-btn-primary { color: var(--dsw-alias-brand-primary, #9ad0ff); }
 .swt-card-body {
   flex: 1;
-  min-height: 0;
-  overflow-y: hidden;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
-/* 折叠态监控卡：正文裁剪不滚动（行内省略号）；对话模式/展开态：容器内滚动 */
-.swt-card.swt-expanded .swt-card-body, .swt-card-body.swt-scroll { overflow-y: auto; }
-.swt-conv {
+/* 容器正文 = 对话流（面板整体滚动，容器自身不滚动） */
+.swt-conv-list { flex: 1; min-width: 0; padding: 6px 8px; }
+/* 工具调用摘要行：工具名 + 参数摘要（与主对话 tab 工具行同风格：左竖条品牌色） */
+.swt-tool {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 4px 0;
+  padding: 3px 8px;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.1));
+  border-left: 3px solid var(--dsw-alias-brand-primary, rgba(154, 208, 255, 0.6));
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.04));
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary, #9aa0a6);
+}
+.swt-tool-name {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-brand-primary, #9ad0ff);
+}
+.swt-tool-summary {
   flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
 }
-.swt-conv-list { flex: 1; padding: 6px 8px; }
-/* 监控详情（默认正文）：折叠态省略号裁剪，展开态完整换行 */
-.swt-details { flex: none; padding: 4px 8px; overflow: hidden; }
-.swt-detail-row { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; }
-.swt-detail-label { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); }
-.swt-detail-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.swt-card.swt-expanded .swt-detail-val { white-space: pre-wrap; word-break: break-word; }
-.swt-detail-val.swt-stall { color: #f87171; font-weight: 700; }
-.swt-detail-val.swt-waiting-val { color: #fbbf24; }
-.swt-detail-val.swt-reply { color: var(--dsw-alias-label-secondary, #8b93a1); }
+/* 容器底部输入框：输入 + 发送（Enter 发送） */
+.swt-input-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.08));
+  background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.02));
+}
+.swt-input {
+  flex: 1;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.14));
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.05));
+  color: var(--dsw-alias-label-primary, #e6e6e6);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+.swt-input::placeholder { color: var(--dsw-alias-label-secondary, #9aa0a6); }
+.swt-input:focus { border-color: var(--dsw-alias-brand-primary, rgba(154, 208, 255, 0.75)); }
+.swt-send {
+  flex: none;
+  cursor: pointer;
+  border: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.16));
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.05));
+  color: var(--dsw-alias-brand-primary, #9ad0ff);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.swt-send:hover:not(:disabled) { border-color: var(--dsw-alias-brand-primary, rgba(154, 208, 255, 0.75)); }
+.swt-send:disabled { opacity: 0.45; cursor: default; }
+.swt-input-err {
+  flex: none;
+  color: #f87171;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 2px 10px 6px;
+  word-break: break-word;
+}
 .swt-hint {
   color: var(--dsw-alias-label-secondary, #9aa0a6);
   text-align: center;
@@ -504,24 +587,24 @@ const TAB_CSS = `
   .swt-right-head-hint { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-card { border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.12)); background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.7)); }
   .swt-card:hover { border-color: var(--dsw-alias-border-l2, rgba(37, 99, 235, 0.4)); }
+  .swt-card:focus-within { border-color: var(--dsw-alias-brand-primary, rgba(37, 99, 235, 0.65)); }
   .swt-card.swt-waiting { border-color: #d97706; background: rgba(217, 119, 6, 0.08); }
   .swt-st-running { background: #16a34a; }
   .swt-st-idle { background: #6b7280; }
   .swt-st-stall { background: #dc2626; }
   .swt-st-finished { background: #2563eb; }
   .swt-st-waiting { background: #d97706; }
-  .swt-card-id { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swt-card-status { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swt-detail-label { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swt-detail-val.swt-stall { color: #dc2626; }
-  .swt-detail-val.swt-waiting-val { color: #b45309; }
-  .swt-detail-val.swt-reply { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swt-card-status.swt-stall { color: #dc2626; }
-  .swt-card-status.swt-waiting-val { color: #b45309; }
-  .swt-card-silent { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-card-btn { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-card-btn:hover { color: var(--dsw-alias-label-primary, #111827); background: rgba(0, 0, 0, 0.05); }
   .swt-card-btn.swt-btn-primary { color: var(--dsw-alias-brand-primary, #2563eb); }
+  .swt-tool { border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.1)); border-left-color: var(--dsw-alias-brand-primary, rgba(37, 99, 235, 0.5)); background: var(--dsw-alias-bg-layer-1, rgba(0, 0, 0, 0.03)); color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swt-tool-name { color: var(--dsw-alias-brand-primary, #2563eb); }
+  .swt-input-row { border-top-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.1)); background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.6)); }
+  .swt-input { border-color: var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.14)); background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.03)); color: var(--dsw-alias-label-primary, #1f2937); }
+  .swt-input:focus { border-color: var(--dsw-alias-brand-primary, rgba(37, 99, 235, 0.65)); }
+  .swt-send { border-color: var(--dsw-alias-border-l2, rgba(0, 0, 0, 0.16)); background: var(--dsw-alias-bg-layer-2, rgba(0, 0, 0, 0.03)); color: var(--dsw-alias-brand-primary, #2563eb); }
+  .swt-send:hover:not(:disabled) { border-color: var(--dsw-alias-brand-primary, rgba(37, 99, 235, 0.65)); }
+  .swt-input-err { color: #dc2626; }
   .swt-hint { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-offline { color: #b45309; }
   .swt-empty { color: var(--dsw-alias-label-secondary, #6b7280); }
@@ -568,8 +651,95 @@ function collectMessages(nodes: readonly ConversationNode[]): TextMessage[] {
   return out
 }
 
-/** host RPC session.history：子代理会话（无 binding）的文本消息来源。 */
-async function fetchSessionHistory(sessionId: string): Promise<TextMessage[] | null> {
+/** 工具调用参数摘要：arguments JSON 字符串 → 单行紧凑摘要（截断）。 */
+function summarizeArguments(raw: string): string {
+  const MAX = 120
+  let compact = raw.trim()
+  if (compact === '') return '{}'
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    if (parsed !== null && typeof parsed === 'object') {
+      const entries = Object.entries(parsed as Record<string, unknown>).slice(0, 6)
+      const parts = entries.map(([k, v]) => {
+        const value = typeof v === 'string' ? v : JSON.stringify(v)
+        const cut = value.length > 60 ? `${value.slice(0, 57)}…` : value
+        return `${k}: ${cut}`
+      })
+      compact = `{ ${parts.join(', ')}${entries.length > 6 ? ', …' : ''} }`
+    } else {
+      compact = JSON.stringify(parsed)
+    }
+  } catch {
+    // 非 JSON（模型原样产出时可能是裸文本）：原样截断。
+  }
+  if (compact.length > MAX) compact = `${compact.slice(0, MAX - 1)}…`
+  return compact
+}
+
+/**
+ * 解析 session.history 事件 → 子代理对话流条目。
+ * user/assistant/message → 文本消息（正文兼容 data.content 与
+ * data.message.content 两处挂载）；tool/call → 工具摘要行（data.name +
+ * data.arguments）；tool/result 折叠进调用行（只渲染 call）。防御性：
+ * message.content / data.content 里的 tool_use / tool-call 块也提取为工具行
+ * ——同一调用可能同时出现在 content 块与独立 tool/call 事件（callId 一致），
+ * 按 callId（缺失时 name+summary）去重。
+ */
+function eventsToConvItems(events: readonly { readonly event?: RpcHistoryEvent }[]): ConvItem[] {
+  const out: ConvItem[] = []
+  const emittedTools = new Set<string>()
+  const toolKey = (callId: string | undefined, name: string | undefined, summary: string): string | null => {
+    if (callId !== undefined && callId !== '') return `id:${callId}`
+    if (name === undefined) return null
+    return `${name}|${summary}`
+  }
+  const appendTool = (name: string, summary: string, callId: string | undefined, time: number): boolean => {
+    const key = toolKey(callId, name, summary)
+    if (key !== null && emittedTools.has(key)) return false
+    if (key !== null) emittedTools.add(key)
+    out.push({ kind: 'tool', name, summary, time })
+    return true
+  }
+  for (const entry of events) {
+    const ev = entry.event
+    if (ev === undefined) continue
+    const time = ev.time ?? 0
+    const m = /^(user|assistant|steering)\/message$/u.exec(ev.type ?? '')
+    if (m !== null) {
+      // 正文：assistant 走 message.content；user/steering 走 data.content 兜底。
+      const messageText = textFromContent(ev.data?.message?.content)
+      const directText = textFromContent(ev.data?.content)
+      const text = messageText !== '' ? messageText : directText
+      if (text !== '') {
+        out.push({
+          kind: m[1] === 'assistant' ? 'assistant' : 'user',
+          text,
+          time,
+        })
+      }
+      // 防御性：content 里若有 tool_use / tool-call 块（派生事件），提取为工具行。
+      for (const block of [...(ev.data?.message?.content ?? []), ...(ev.data?.content ?? [])]) {
+        if ((block.type === 'tool_use' || block.type === 'tool-call') && typeof block.name === 'string') {
+          const rawArgs = block.arguments ?? block.input
+          const summary = rawArgs === undefined ? '…'
+            : typeof rawArgs === 'string' ? summarizeArguments(rawArgs)
+            : summarizeArguments(JSON.stringify(rawArgs))
+          appendTool(block.name, summary, block.id, time)
+        }
+      }
+      continue
+    }
+    if (ev.type === 'tool/call') {
+      appendTool(ev.data?.name ?? 'tool', summarizeArguments(ev.data?.arguments ?? '{}'), ev.data?.callId, time)
+      continue
+    }
+    // tool/result 等事件：不单独渲染（调用行即摘要）。
+  }
+  return out
+}
+
+/** host RPC session.history：子代理会话（无 binding）的对话流来源。 */
+async function fetchSessionHistory(sessionId: string): Promise<ConvItem[] | null> {
   try {
     const res = await fetch('/api/session.history', {
       method: 'POST',
@@ -586,23 +756,52 @@ async function fetchSessionHistory(sessionId: string): Promise<TextMessage[] | n
       result?: { ok?: boolean; value?: { events?: readonly { event?: RpcHistoryEvent }[] } }
     }
     const events = full.result?.ok === true ? full.result.value?.events ?? [] : []
-    const out: TextMessage[] = []
-    for (const entry of events) {
-      const ev = entry.event
-      if (ev === undefined) continue
-      const m = /^(user|assistant|steering)\/message$/u.exec(ev.type ?? '')
-      if (m === null) continue
-      const text = textFromContent(ev.data?.message?.content)
-      if (text === '') continue
-      out.push({
-        role: m[1] === 'assistant' ? 'assistant' : 'user',
-        text,
-        time: ev.time ?? 0,
-      })
-    }
-    return out
+    return eventsToConvItems(events)
   } catch {
     return null
+  }
+}
+
+/**
+ * 给子代理发消息。优先按规格走 `session.prompt`（mode:'queue'），但宿主对
+ * 子代理会话直接拒收（agent-busy: "owned by subagent routing"）——此时回退
+ * 到宿主正牌通道 `subagent.prompt`（需要 parentSessionId + mode:'continuable'）。
+ * 两条路任一成功即算投递。
+ */
+async function promptSubagent(sessionId: string, parentSessionId: string, text: string): Promise<boolean> {
+  const content = [{ type: 'text' as const, text }]
+  try {
+    const res = await fetch('/api/session.prompt', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: newRpcId(),
+        method: 'session.prompt',
+        payload: { sessionId, mode: 'queue', content },
+      }),
+    })
+    if (res.ok) {
+      const full = await res.json() as { result?: { ok?: boolean; value?: { accepted?: boolean } } }
+      if (full.result?.ok === true && full.result.value?.accepted === true) return true
+    }
+  } catch { /* session.prompt 网络失败 → 继续尝试 subagent.prompt */ }
+  try {
+    const res = await fetch('/api/subagent.prompt', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: newRpcId(),
+        method: 'subagent.prompt',
+        payload: { parentSessionId, childSessionId: sessionId, mode: 'continuable', content },
+      }),
+    })
+    if (!res.ok) return false
+    const full = await res.json() as { result?: { ok?: boolean } }
+    return full.result?.ok === true
+  } catch {
+    return false
   }
 }
 
@@ -773,6 +972,43 @@ function renderMessage(msg: TextMessage): HTMLDivElement {
     wrap.appendChild(bubble)
   } else {
     wrap.appendChild(renderMarkdown(msg.text))
+  }
+  return wrap
+}
+
+/** 工具调用摘要行（工具名 + 参数摘要）。 */
+function renderToolRow(item: Extract<ConvItem, { kind: 'tool' }>): HTMLDivElement {
+  const row = document.createElement('div')
+  row.className = 'swt-tool'
+  row.title = `工具调用 ${item.name} · ${new Date(item.time).toLocaleTimeString()}`
+  const name = document.createElement('span')
+  name.className = 'swt-tool-name'
+  name.textContent = `🔧 ${item.name}`
+  const summary = document.createElement('span')
+  summary.className = 'swt-tool-summary'
+  summary.textContent = item.summary
+  row.appendChild(name)
+  row.appendChild(summary)
+  return row
+}
+
+/** 一条子代理对话流条目（右栏 agent 容器正文）。 */
+function renderConvItem(item: ConvItem): HTMLDivElement {
+  if (item.kind === 'tool') return renderToolRow(item)
+  const wrap = document.createElement('div')
+  wrap.className = `swt-msg swt-msg-${item.kind}`
+  const label = document.createElement('div')
+  label.className = 'swt-msg-label'
+  const time = item.time > 0 ? new Date(item.time).toLocaleTimeString() : ''
+  label.textContent = item.kind === 'user' ? `你 · ${time}` : `助手 · ${time}`
+  wrap.appendChild(label)
+  if (item.kind === 'user') {
+    const bubble = document.createElement('div')
+    bubble.className = 'swt-bubble'
+    bubble.textContent = item.text
+    wrap.appendChild(bubble)
+  } else {
+    wrap.appendChild(renderMarkdown(item.text))
   }
   return wrap
 }
@@ -1072,7 +1308,7 @@ class SubagentTabController {
   private readonly cards = new Map<string, CardEl>()
   /** 子代理对话流缓存（session.history RPC 结果）。 */
   private readonly cardConv = new Map<string, {
-    readonly msgs: readonly TextMessage[]
+    readonly msgs: readonly ConvItem[]
     state: 'loading' | 'ok' | 'fail'
     fetchedAt: number
     lastActivity: number
@@ -1089,10 +1325,6 @@ class SubagentTabController {
   private leftUnsub: (() => void) | null = null
 
   private snapshot: AgentBoardSnapshot | null = null
-  /** 展开聚焦的卡片 id（null = 分屏均分）。 */
-  private expandedId: string | null = null
-  /** 卡片 id → 对话流模式（监控卡 ↔ 对话流切换）。 */
-  private readonly convOnSet = new Set<string>()
   /** 左栏宽度（px）。 */
   private leftWidth = 0
   /** 左栏是否粘底（有新消息自动滚到底）。 */
@@ -1155,7 +1387,7 @@ class SubagentTabController {
     this.rightHeadCountEl.className = 'swt-right-head-hint'
     const rightHint = document.createElement('span')
     rightHint.className = 'swt-right-head-hint'
-    rightHint.textContent = '直属子代理 · 各自容器内滑动 · 挂起可原地应答'
+    rightHint.textContent = '直属子代理 · 点击容器聚焦输入框 · 挂起可原地应答'
     rightHead.appendChild(rightTitle)
     rightHead.appendChild(this.rightHeadCountEl)
     rightHead.appendChild(rightHint)
@@ -1473,8 +1705,6 @@ class SubagentTabController {
       if (ids.has(id)) continue
       this.cardConv.delete(id)
       this.fetchingHistory.delete(id)
-      this.convOnSet.delete(id)
-      if (this.expandedId === id) this.expandedId = null
       card.root.remove()
       this.cards.delete(id)
     }
@@ -1504,6 +1734,7 @@ class SubagentTabController {
     const root = document.createElement('div')
     root.className = 'swt-card'
 
+    // 头部一行：状态色点 + 标题（label/title/id 前 8）+ 「跳转」按钮。
     const head = document.createElement('div')
     head.className = 'swt-card-head'
     const dotEl = document.createElement('span')
@@ -1511,67 +1742,46 @@ class SubagentTabController {
     const titleEl = document.createElement('span')
     titleEl.className = 'swt-card-title'
     titleEl.title = row.id
-    const idEl = document.createElement('span')
-    idEl.className = 'swt-card-id'
-    idEl.textContent = row.id.slice(0, ID_PREFIX)
-    const statusEl = document.createElement('span')
-    statusEl.className = 'swt-card-status'
-    const silentEl = document.createElement('span')
-    silentEl.className = 'swt-card-silent'
-    const convBtnEl = document.createElement('button')
-    convBtnEl.type = 'button'
-    convBtnEl.className = 'swt-card-btn swt-btn-primary'
-    convBtnEl.textContent = '对话'
-    convBtnEl.title = '切换监控卡 / 该子代理对话流'
     const openBtnEl = document.createElement('button')
     openBtnEl.type = 'button'
-    openBtnEl.className = 'swt-card-btn'
+    openBtnEl.className = 'swt-card-btn swt-btn-primary'
     openBtnEl.textContent = '跳转'
     openBtnEl.title = '打开该子代理会话'
-    const collapseBtnEl = document.createElement('button')
-    collapseBtnEl.type = 'button'
-    collapseBtnEl.className = 'swt-card-btn'
-    collapseBtnEl.textContent = '▾ 收起'
-    collapseBtnEl.title = '返回分屏均分'
-    collapseBtnEl.style.display = 'none'
     head.appendChild(dotEl)
     head.appendChild(titleEl)
-    head.appendChild(idEl)
-    head.appendChild(statusEl)
-    head.appendChild(silentEl)
-    head.appendChild(convBtnEl)
     head.appendChild(openBtnEl)
-    head.appendChild(collapseBtnEl)
 
-    // 监控详情（默认正文）：状态/动作/静默/最新答复/等待。
+    // 正文 = 该子代理自己的对话流（面板整体滚动，容器不滚动）。
     const body = document.createElement('div')
     body.className = 'swt-card-body'
-    const detailsEl = document.createElement('div')
-    detailsEl.className = 'swt-details'
-    for (const labelText of ['状态', '动作', '静默', '最新答复', '等待']) {
-      const r = document.createElement('div')
-      r.className = 'swt-detail-row'
-      const l = document.createElement('span')
-      l.className = 'swt-detail-label'
-      l.textContent = labelText
-      const v = document.createElement('span')
-      v.className = 'swt-detail-val'
-      r.appendChild(l)
-      r.appendChild(v)
-      detailsEl.appendChild(r)
-    }
-    const convEl = document.createElement('div')
-    convEl.className = 'swt-conv'
-    convEl.style.display = 'none'
     const convList = document.createElement('div')
     convList.className = 'swt-conv-list'
-    convEl.appendChild(convList)
-    body.appendChild(detailsEl)
-    body.appendChild(convEl)
+    body.appendChild(convList)
+
+    // 底部输入框 + 发送按钮（Enter 发送）。
+    const inputRow = document.createElement('div')
+    inputRow.className = 'swt-input-row'
+    const inputEl = document.createElement('input')
+    inputEl.type = 'text'
+    inputEl.className = 'swt-input'
+    inputEl.placeholder = `给「${row.label ?? row.title ?? row.id.slice(0, ID_PREFIX)}」发消息…`
+    inputEl.autocomplete = 'off'
+    const sendBtnEl = document.createElement('button')
+    sendBtnEl.type = 'button'
+    sendBtnEl.className = 'swt-send'
+    sendBtnEl.textContent = '发送'
+    inputRow.appendChild(inputEl)
+    inputRow.appendChild(sendBtnEl)
+    const errEl = document.createElement('div')
+    errEl.className = 'swt-input-err'
+    errEl.style.display = 'none'
+    body.appendChild(inputRow)
+    body.appendChild(errEl)
+
     root.appendChild(head)
     root.appendChild(body)
 
-    // 单击（非按钮）＝展开聚焦/收起；拖动（滚动）超过阈值不算点击。
+    // 点击容器（头部或正文，非按钮/输入框）→ 聚焦其输入框。
     let downX = 0
     let downY = 0
     root.addEventListener('pointerdown', (e) => {
@@ -1580,148 +1790,54 @@ class SubagentTabController {
     })
     root.addEventListener('click', (e) => {
       if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > CLICK_MOVE_PX) return
-      this.toggleExpanded(row.id)
-    })
-    collapseBtnEl.addEventListener('click', (e) => {
-      e.stopPropagation()
-      this.toggleExpanded(row.id)
-    })
-    convBtnEl.addEventListener('click', (e) => {
-      e.stopPropagation()
-      this.toggleConversation(row.id)
+      if ((e.target as HTMLElement | null)?.closest?.('button, input') !== null) return
+      inputEl.focus()
     })
     openBtnEl.addEventListener('click', (e) => {
       e.stopPropagation()
       this.openSubagent(row)
     })
 
+    // Enter 发送。
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return
+      e.preventDefault()
+      this.sendToSubagent(row)
+    })
+    sendBtnEl.addEventListener('click', () => this.sendToSubagent(row))
+
     return {
       id: row.id,
       root,
       dotEl,
       titleEl,
-      idEl,
-      statusEl,
-      silentEl,
-      convBtnEl,
       openBtnEl,
-      collapseBtnEl,
       bodyEl: body,
-      detailsEl,
-      convEl,
       convListEl: convList,
+      inputEl,
+      sendBtnEl,
+      errEl,
     }
   }
 
-  /** 卡片：头部监控信息 + 监控详情 + 展开/对话布局。 */
+  /** 容器头部：状态色点 + 标题 + waiting 高亮（无监控详情/切换按钮）。 */
   private updateCard(card: CardEl, row: AgentSnapshotRow): void {
     const threshold = this.snapshot?.stallThresholdMs ?? 0
-    const { text, stalled } = statusText(row, threshold)
+    const { stalled } = statusText(row, threshold)
     const waiting = row.waiting !== undefined
     card.root.classList.toggle('swt-waiting', waiting)
-    card.root.classList.toggle('swt-finished', row.status === 'finished')
-    // 状态色点（照 tree.ts stClass：等待→黄 / 停滞→红 / 完成→蓝(已读灰) / 运行→绿 / 空闲→灰）。
+    // 状态色点：等待→黄 / 停滞→红 / 完成→蓝 / 运行→绿 / 空闲→灰。
     const stClass = waiting ? 'swt-st-waiting'
       : stalled ? 'swt-st-stall'
-      : row.status === 'finished' ? (isViewed(row.id) ? 'swt-st-idle' : 'swt-st-finished')
+      : row.status === 'finished' ? 'swt-st-finished'
       : row.status === 'running' ? 'swt-st-running'
       : 'swt-st-idle'
     card.dotEl.className = `swt-dot ${stClass}`
     // 标题：label 或 title 或 id 前 8 位。
     card.titleEl.textContent = row.label ?? row.title ?? row.id.slice(0, ID_PREFIX)
-    // 状态文本（等待/动作/停滞/完成/空闲）。
-    card.statusEl.textContent = waiting
-      ? '🔔 等你判断'
-      : (text === '' ? (row.status === 'running' ? '运行中' : row.status) : text)
-    card.statusEl.className = `swt-card-status${waiting ? ' swt-waiting-val' : ''}${stalled ? ' swt-stall' : ''}`
-    // 静默（仅 running 显示）。
-    card.silentEl.textContent = row.status === 'running' ? `静默 ${formatDuration(row.silentMs)}` : ''
-    // 监控详情行。
-    const vals = this.cardDetailVals(card)
-    vals.status.textContent = text === '' ? (row.status === 'running' ? '运行中' : row.status) : text
-    vals.status.className = `swt-detail-val${stalled ? ' swt-stall' : ''}${waiting ? ' swt-waiting-val' : ''}`
-    vals.action.textContent = row.action !== undefined
-      ? (row.action.kind === 'tool' ? row.action.text : '输出中…')
-      : '—'
-    vals.silent.textContent = row.status === 'running' ? formatDuration(row.silentMs) : '—'
-    vals.reply.textContent = row.lastReply ?? '—'
-    vals.reply.className = 'swt-detail-val swt-reply'
-    vals.waiting.textContent = row.waiting ?? '—'
-    vals.waiting.className = `swt-detail-val${waiting ? ' swt-waiting-val' : ''}`
-    // 布局：展开聚焦（完整信息+对话区）↔ 分屏均分；监控卡 ↔ 对话流。
-    this.layoutCard(card)
-  }
-
-  /** 取监控详情行值 span（按行 key）。 */
-  private cardDetailVals(card: CardEl): Record<'status' | 'action' | 'silent' | 'reply' | 'waiting', HTMLSpanElement> {
-    const spans = Array.from(card.detailsEl.querySelectorAll<HTMLSpanElement>('.swt-detail-val'))
-    const labels = Array.from(card.detailsEl.querySelectorAll<HTMLSpanElement>('.swt-detail-label'))
-    const out = {} as Record<'status' | 'action' | 'silent' | 'reply' | 'waiting', HTMLSpanElement>
-    for (const [i, label] of labels.entries()) {
-      const key = (label.textContent ?? '') as '状态' | '动作' | '静默' | '最新答复' | '等待'
-      const map: Record<string, 'status' | 'action' | 'silent' | 'reply' | 'waiting'> = {
-        '状态': 'status', '动作': 'action', '静默': 'silent', '最新答复': 'reply', '等待': 'waiting',
-      }
-      out[map[key]] = spans[i]!
-    }
-    return out
-  }
-
-  /** 布局：折叠态监控卡 ↔ 对话流二选一；展开态完整信息 + 对话区同显。 */
-  private layoutCard(card: CardEl): void {
-    const expanded = this.expandedId === card.id
-    const convOn = this.convOnSet.has(card.id)
-    card.root.classList.toggle('swt-expanded', expanded)
-    card.root.classList.toggle('swt-hidden', this.expandedId !== null && !expanded)
-    card.collapseBtnEl.style.display = expanded ? '' : 'none'
-    card.convBtnEl.textContent = convOn ? '监控' : '对话'
-    // 折叠态：监控卡（详情）↔ 对话流二选一；展开态：完整信息 + 对话区。
-    card.detailsEl.style.display = expanded || !convOn ? '' : 'none'
-    card.convEl.style.display = convOn ? 'flex' : 'none'
-    // 正文滚动：仅对话模式/展开态需要（监控卡折叠态裁剪，无滚动条）。
-    card.bodyEl.classList.toggle('swt-scroll', convOn)
   }
 
   // ------------------------------------------------------------ 卡片交互
-
-  /** 单击展开聚焦（占满右侧，完整信息 + 对话区）；再点/收起返回分屏均分（监控墙）。 */
-  private toggleExpanded(id: string): void {
-    if (this.expandedId === id) {
-      this.expandedId = null
-      // 返回分屏均分 = 回到默认监控卡（对话模式复位，由「对话」按钮显式开启）。
-      this.convOnSet.delete(id)
-    } else {
-      this.expandedId = id
-      // 展开即显示对话区（完整信息 + 对话区）。
-      this.convOnSet.add(id)
-      const card = this.cards.get(id)
-      if (card !== undefined) this.ensureConversationLoaded(card)
-    }
-    this.reapplyCards()
-  }
-
-  /** 「对话」按钮：监控卡 ↔ 对话流切换。 */
-  private toggleConversation(id: string): void {
-    if (this.convOnSet.has(id)) {
-      this.convOnSet.delete(id)
-    } else {
-      this.convOnSet.add(id)
-      const card = this.cards.get(id)
-      if (card !== undefined) this.ensureConversationLoaded(card)
-    }
-    this.reapplyCards()
-  }
-
-  /** 保证对话流已加载（首次进入对话模式/展开时触发）。 */
-  private ensureConversationLoaded(card: CardEl): void {
-    const row = this.snapshot?.rows.find(r => r.id === card.id)
-    if (row === undefined) return
-    if (!this.cardConv.has(card.id) || this.cardConv.get(card.id)!.state === 'fail') {
-      this.maybeRefreshConversation(card, row)
-    } else {
-      this.renderCardConversation(card, row)
-    }
-  }
 
   /** 打开子代理会话（复用 tree.ts openBoardSession + 已读标记）。失败给红色反馈。 */
   private openSubagent(row: AgentSnapshotRow): void {
@@ -1735,6 +1851,30 @@ class SubagentTabController {
         c.root.classList.remove('swt-opening')
         c.root.classList.add('swt-open-failed')
         c.root.title = '打开会话失败（会话可能已不存在），稍后重试'
+      }
+    })
+  }
+
+  /** 发送消息给该子代理（session.prompt，mode:'queue'）。成功清空输入框并重拉对话。 */
+  private sendToSubagent(row: AgentSnapshotRow): void {
+    const card = this.cards.get(row.id)
+    if (card === undefined || card.sendBtnEl.disabled) return
+    const text = card.inputEl.value.trim()
+    if (text === '') return
+    card.sendBtnEl.disabled = true
+    card.errEl.style.display = 'none'
+    void promptSubagent(row.id, row.parentSession ?? this.sessionId, text).then(ok => {
+      const c = this.cards.get(row.id)
+      if (this.disposed || c === undefined) return
+      c.sendBtnEl.disabled = false
+      if (ok) {
+        c.inputEl.value = ''
+        // 立即重拉：排队消息一旦被该子代理认领即出现在 history。
+        const r = this.snapshot?.rows.find(x => x.id === row.id)
+        if (r !== undefined) this.refreshCardConversationNow(c, r)
+      } else {
+        c.errEl.textContent = '发送失败（子代理可能已结束或宿主拒绝），请重试'
+        c.errEl.style.display = 'block'
       }
     })
   }
@@ -1774,11 +1914,15 @@ class SubagentTabController {
     })
   }
 
-  /** 立即重拉该卡片对话流（应答成功后刷新，让答案出现在对话里）。 */
+  /** 立即重拉该卡片对话流（发送成功/应答成功后调用，让新消息出现在对话里）。 */
   private refreshCardConversationNow(card: CardEl, row: AgentSnapshotRow): void {
     if (this.fetchingHistory.has(card.id)) return
     this.fetchingHistory.add(card.id)
-    this.cardConv.set(card.id, { msgs: [], state: 'loading', fetchedAt: 0, lastActivity: row.lastActivity })
+    const cached = this.cardConv.get(card.id)
+    // 已有内容则保留展示（避免刷新瞬间闪「加载中」），仅首拉/失败态才置 loading。
+    if (cached === undefined || cached.state !== 'ok') {
+      this.cardConv.set(card.id, { msgs: [], state: 'loading', fetchedAt: 0, lastActivity: row.lastActivity })
+    }
     this.renderCardConversation(card, row)
     void fetchSessionHistory(card.id).then(msgs => {
       this.fetchingHistory.delete(card.id)
@@ -1793,11 +1937,12 @@ class SubagentTabController {
     })
   }
 
-  /** 渲染卡片对话：消息 + 该子代理的挂起提问/审批卡（粘底滚动走卡片容器）。 */
+  /** 渲染容器对话：消息（气泡/markdown/工具行）+ 该子代理的挂起提问/审批卡。 */
   private renderCardConversation(card: CardEl, row: AgentSnapshotRow): void {
     if (this.disposed || !card.convListEl.isConnected) return
-    const body = card.bodyEl
-    const stick = body.scrollTop + body.clientHeight >= body.scrollHeight - 80
+    // 粘底判定走右侧面板滚动容器（容器自身不滚动）。
+    const scroll = this.cardsEl
+    const stick = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 80
     const list = card.convListEl
     const cached = this.cardConv.get(card.id)
     list.replaceChildren()
@@ -1808,11 +1953,11 @@ class SubagentTabController {
     } else if (cached.msgs.length === 0) {
       list.appendChild(hintLine('该子代理暂无对话消息'))
     } else {
-      for (const msg of cached.msgs) list.appendChild(renderMessage(msg))
+      for (const item of cached.msgs) list.appendChild(renderConvItem(item))
     }
     // 挂起交互卡（mux 注册表；waiting 才展示；无注册项时从 action.text 兜底展示）。
     this.renderCardPending(list, row)
-    if (stick) body.scrollTop = body.scrollHeight
+    if (stick) scroll.scrollTop = scroll.scrollHeight
   }
 
   private renderCardPending(list: HTMLDivElement, row: AgentSnapshotRow): void {
@@ -1863,11 +2008,17 @@ class SubagentTabController {
       this.renderLeftFromSession(binding.session)
       return
     }
-    // 降级：host RPC。
-    void fetchSessionHistory(this.sessionId).then(msgs => {
+    // 降级：host RPC（历史事件里仅取 user/assistant 文本消息）。
+    void fetchSessionHistory(this.sessionId).then(items => {
       if (this.disposed) return
-      if (msgs !== null) this.renderLeftMessages(msgs)
-      else this.renderLeftHint('对话不可用')
+      if (items !== null) {
+        const msgs: TextMessage[] = items
+          .filter((i): i is Extract<ConvItem, { kind: 'user' | 'assistant' }> => i.kind !== 'tool')
+          .map(i => ({ role: i.kind, text: i.text, time: i.time }))
+        this.renderLeftMessages(msgs)
+      } else {
+        this.renderLeftHint('对话不可用')
+      }
     })
   }
 
