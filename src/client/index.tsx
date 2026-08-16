@@ -140,16 +140,6 @@ const WIDGET_CSS = `
 .swd-dot-ring { background: transparent; border: 1.5px solid; }
 .swd-toggle { cursor: pointer; color: #9aa0a6; font-size: 9px; flex: none; width: 10px; text-align: center; }
 .swd-toggle:hover { color: #fff; }
-.swd-open {
-  cursor: pointer;
-  color: #6b7280;
-  font-size: 10px;
-  flex: none;
-  width: 12px;
-  text-align: center;
-  margin-left: 2px;
-}
-.swd-open:hover { color: #9ad0ff; }
 /* 完成态行：整体弱化，突出「已完成」而不抢 running 的注意力 */
 .swd-finished-line { opacity: 0.62; }
 .swd-tag {
@@ -279,13 +269,13 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
 
 /** 渲染一个树节点（递归）。根节点（顶层会话）蓝色点，当前会话加「当前」标记；
  *  子代理节点显示「子代理<兄弟序号>-<创建名>」。
- *  交互：有子节点的根——整行点击 = 展开/折叠，右侧 ⤢ = 打开会话；
- *  叶子节点（无子节点）——点击 = 打开会话。 */
+ *  列结构全行统一（同层严格同列）：[toggle占位10px][圆点][id][节选][状态][当前?]
+ *  交互：整行点击 = 打开会话；根节点且有子节点时，行首 ▸/▾ 折叠/展开子树。 */
 function renderNode(
   node: TreeNode,
   threshold: number,
   onOpen: (id: string, parentId?: string) => void,
-  opts: { isRoot?: boolean; isCurrent?: boolean; idx?: number; collapsed?: boolean; onToggle?: () => void } = {},
+  opts: { isRoot?: boolean; isCurrent?: boolean; currentId?: string; idx?: number; collapsed?: boolean; onToggle?: () => void } = {},
 ): HTMLLIElement {
   const { row } = node
   const hasChildren = node.children.length > 0
@@ -293,22 +283,14 @@ function renderNode(
   const line = document.createElement('div')
   line.className = 'swd-node'
   if (row.status === 'finished') line.classList.add('swd-finished-line')
-  // 点击语义：有子节点的根 → 展开/折叠；无子节点 → 打开会话。
-  if (opts.isRoot === true && hasChildren) {
-    line.title = `点击展开/折叠子树；⤢ 打开会话 ${row.id}`
-    line.addEventListener('click', (e) => {
-      e.stopPropagation()
-      opts.onToggle?.()
-    })
-  } else {
-    line.title = row.lastReply !== undefined
-      ? `点击打开会话 ${row.id}\n最新答复：${row.lastReply}`
-      : `点击打开会话 ${row.id}`
-    line.addEventListener('click', (e) => {
-      e.stopPropagation()
-      onOpen(row.id, row.parentSession)
-    })
-  }
+  // 整行点击 = 打开会话（所有节点一致，含折叠的根）。
+  line.title = row.lastReply !== undefined
+    ? `点击打开会话 ${row.id}\n最新答复：${row.lastReply}`
+    : `点击打开会话 ${row.id}`
+  line.addEventListener('click', (e) => {
+    e.stopPropagation()
+    onOpen(row.id, row.parentSession)
+  })
   const { text, stalled } = statusText(row, threshold)
   const stClass = stalled ? 'swd-st-stall'
     : row.status === 'finished' ? 'swd-st-finished'
@@ -326,35 +308,23 @@ function renderNode(
         ? `子代理${opts.idx ?? '?'}-${row.label.slice(0, 24)}`
         : (row.title ?? row.id.slice(0, 8)))
   idEl.title = row.id
-  // 根节点折叠开关：仅当真有子节点可展示时才渲染（空根不画假按钮）。
+  // toggle 列：全行统一占位（10px），保证圆点/id 列对齐；
+  // 仅「根且有子节点」时可点（空根/子代理不画假箭头）。
+  const toggle = document.createElement('span')
+  toggle.className = 'swd-toggle'
   if (opts.isRoot === true && hasChildren) {
-    const toggle = document.createElement('span')
-    toggle.className = 'swd-toggle'
     toggle.textContent = opts.collapsed === true ? '▸' : '▾'
     toggle.title = opts.collapsed === true ? '展开子树' : '折叠子树'
     toggle.addEventListener('click', (e) => {
       e.stopPropagation()
       opts.onToggle?.()
     })
-    line.appendChild(toggle)
-    // 打开会话按钮：整行点击改为展开/折叠后，跳转挪到这里。
-    const open = document.createElement('span')
-    open.className = 'swd-open'
-    open.textContent = '⤢'
-    open.title = '打开会话'
-    open.addEventListener('click', (e) => {
-      e.stopPropagation()
-      onOpen(row.id, row.parentSession)
-    })
-    line.appendChild(open)
+  } else {
+    toggle.textContent = '\u00a0'
+    toggle.style.cursor = 'default'
   }
+  line.appendChild(toggle)
   line.appendChild(dot)
-  if (opts.isCurrent === true) {
-    const tag = document.createElement('span')
-    tag.className = 'swd-tag'
-    tag.textContent = '当前'
-    line.appendChild(tag)
-  }
   line.appendChild(idEl)
   // 答复节选：与状态同一行（名字之后、状态之前），超长省略；有当前动作时
   // 节选已过时（动作即进展），隐藏。
@@ -368,11 +338,19 @@ function renderNode(
   meta.className = stalled ? 'swd-stall' : 'swd-meta'
   meta.textContent = text
   if (text !== '') line.appendChild(meta)
+  // 「当前」标记：放行尾（不占前列，避免列错位）。
+  if (opts.isCurrent === true) {
+    const tag = document.createElement('span')
+    tag.className = 'swd-tag'
+    tag.textContent = '当前'
+    line.appendChild(tag)
+  }
   li.appendChild(line)
   if (node.children.length > 0 && opts.collapsed !== true) {
     const ul = document.createElement('ul')
     for (const [i, child] of node.children.entries()) {
-      ul.appendChild(renderNode(child, threshold, onOpen, { idx: i + 1 }))
+      // 子代理行同样参与「当前」标记（点开子代理会话后行尾显示 tag，跳转有反馈）。
+      ul.appendChild(renderNode(child, threshold, onOpen, { idx: i + 1, isCurrent: child.row.id === opts.currentId }))
     }
     li.appendChild(ul)
   }
@@ -723,6 +701,7 @@ class AgentBoardWidget {
       this.treeEl.appendChild(renderNode(root, snapshot.stallThresholdMs, (id, parentId) => this.openSession(id, parentId), {
         isRoot: true,
         isCurrent: root.row.id === currentId,
+        currentId,
         collapsed,
         onToggle: () => this.toggleRoot(root.row.id),
       }))
