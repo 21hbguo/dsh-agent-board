@@ -96,6 +96,7 @@ const WIDGET_CSS = `
   font-weight: 600;
   color: #9ad0ff;
   cursor: grab;
+  touch-action: none;
   white-space: nowrap;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
