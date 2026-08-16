@@ -231,8 +231,11 @@ class DockedLayout {
     this.sizeObserver = new ResizeObserver(() => { measure() })
     this.sizeObserver.observe(frame)
 
-    // 初始同步：读 shell 已应用的 inline 网格。
-    const initial = frame.style.gridTemplateColumns
+    // 初始同步：读 shell 已应用的网格。优先 inline（React 写的），
+    // inline 尚未写入时回退 computed（CSS 类定义的 grid 同样可解析）——
+    // 否则 shellTracks 为空会让 applyGrid 静默失效：列落进 grid 隐式轨道，
+    // 宽度失控（隐藏/折叠/显示全部失灵，面板「关不掉」或「出不来」）。
+    const initial = frame.style.gridTemplateColumns || getComputedStyle(frame).gridTemplateColumns
     if (initial !== '') {
       const tracks = parseGridTracks(initial)
       if (tracks.length === 3) {
@@ -248,6 +251,23 @@ class DockedLayout {
     }
     measure()
     this.applyGrid()
+    // 网格尚未就绪（inline 与 computed 都为空）：延迟重读一次，
+    // 避免 shellTracks 永远为空导致面板宽度失控。
+    if (this.shellTracks.length !== 3) {
+      window.setTimeout(() => {
+          if (this.frame === null || this.shellTracks.length === 3) return
+        const now = this.frame.style.gridTemplateColumns || getComputedStyle(this.frame).gridTemplateColumns
+        if (now === '') return
+        const tracks = parseGridTracks(now)
+        if (tracks.length === 3) {
+          this.shellTracks = tracks
+        } else if (tracks.length === 5) {
+          this.shellTracks = tracks.slice(0, 3)
+          this.extraTracks = tracks.slice(3)
+        }
+        this.applyGrid()
+      }, 500)
+    }
   }
 
   /** 重写 frame 网格并定位把手/展开按钮（public：App 状态变化时直接调用）。 */
@@ -257,7 +277,10 @@ class DockedLayout {
     if (this.shellTracks.length !== 3) return
     const width = this.deps.isVisible() && !this.deps.isCollapsed() ? Math.round(this.deps.getWidth()) : 0
     const grid = [...this.shellTracks, ...this.extraTracks, `${width}px`].join(' ')
-    if (grid === this.lastApplied) return
+    // 幂等判定与 DOM 当前值比较（而非上次计算值）：React 每次渲染会把
+    // 我们的尾轨覆盖回 shell 轨道，此时必须写回——否则列落进 grid 隐式
+    // 轨道，宽度失控（隐藏/折叠/显示全部失灵）。
+    if (grid === frame.style.gridTemplateColumns) return
     // 我们自己改轨道（拖拽/折叠/展开）时禁用 shell 的 grid 过渡，
     // 否则 300ms 缓动让把手/内容跟不上指针（aionui 同款处理）。
     // 拖拽期间类由 beginDrag 持续持有（onDragEnd 移除），这里只处理单次操作。
