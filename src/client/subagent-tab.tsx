@@ -1,10 +1,12 @@
 /**
  * 会话页「子代理」tab：左主右子分屏视图。
  *
- * 布局：左侧 = 当前主 agent 会话的完整对话流（文本消息，只读）；右侧 =
- * 该会话的直属子代理（parentSession === sessionId 且 depth === 1）窗格列表，
- * 各窗格均分高度、整体可滚动；中间一条可拖拽分隔条（左宽右窄，宽度持久化
- * localStorage `dsh.agentBoard.tabSplit.v1`，向右拖 = 左变宽）。
+ * 布局：左侧 = 当前主 agent 会话的完整对话流（markdown 文本消息，只读 +
+ * 底部等待人工交互区）；右侧 = 该会话直属子代理（parentSession === sessionId
+ * 且 depth === 1）的「agent 容器」列表——每个容器固定高度（均分）、内部滚动，
+ * 内容 = 该子代理自己的真实对话流（markdown）+ 该子代理挂起的提问/审批卡。
+ * 中间一条可拖拽分隔条（左宽右窄，宽度持久化 localStorage
+ * `dsh.agentBoard.tabSplit.v1`，向右拖 = 左变宽）。
  *
  * 数据流：挂载即拉 `GET /api/agent-board/agents` + 2s 轮询 + SSE
  * `GET /api/agent-board/stream` 即时刷新（卸载清理）；「当前会话」取
@@ -15,14 +17,20 @@
  * 12 条 finished（快照序 = 创建时间新→旧）；running 恒显示；waiting
  * （等待人工）整卡黄色高亮。
  *
- * 对话渲染：主会话/子代理会话统一走「binding（ctx.sessions.binding →
- * snapshot.nodes 文本消息，可订阅实时更新）→ 降级 host RPC
- * POST /api/session.history（result.value.events 的 user/assistant/message
- * 文本）→ 兜底 lastReply 节选」链路。
+ * 对话渲染：主会话走 binding（ctx.sessions.binding → snapshot.nodes 文本消息，
+ * 可订阅实时更新）；子代理会话无 binding（eligible 仅限 current/列表内），
+ * 走 host RPC `POST /api/session.history`（result.value.events 的
+ * user/assistant/message 文本）+ 活动变化节流刷新。
  *
- * 交互：单击窗格 = 展开聚焦（占满右侧，完整信息 + 对话区）；再点或点
- * 「收起」返回分屏均分；窗格内「对话」按钮 = 监控卡 ↔ 子代理对话流切换；
- * 「跳转」按钮 = openBoardSession（复用 tree.ts，含已读标记）。
+ * 原地应答：挂起提问/审批经 mux 流 `GET /api/events.mux`（SSE，连接即重放
+ * 全部挂起帧、rpcId 稳定）维护注册表，应答走 `POST /api/respond`
+ * client-response 信封（协议逐字段对齐 ui-user-questions PendingQuestion /
+ * ui-conversation ApprovalPanel）。快照 pending 缺失时从 action.text
+ * （ask_user_question: {json}）解析提问内容兜底展示。
+ *
+ * 交互：卡片头 = 状态点/标题/状态/静默/等待高亮 + 「跳转」按钮
+ * （openBoardSession，复用 tree.ts，含已读标记）；无展开交互——每个
+ * agent 容器直接就是可读可答的对话。
  *
  * 全部渲染为 plain DOM（与悬浮窗/停靠面板同风格），仅入口是薄 React 壳
  * （conversation.view 槽位组件必须是 React 组件）。
@@ -73,20 +81,14 @@ const MAX_FINISHED_CARDS = 12
 const ID_PREFIX = 8
 /** 拖拽超过该位移视为拖动而非点击（滚动/点选区分）。 */
 const CLICK_MOVE_PX = 4
+/** 子代理对话流刷新节流（ms）：活动变化后至少间隔这么久才重拉 history。 */
+const CARD_REFRESH_MIN_MS = 4000
 
 /** 一条纯文本对话消息（自绘轻量对话用）。 */
 interface TextMessage {
   readonly role: 'user' | 'assistant'
   readonly text: string
   readonly time: number
-}
-
-/** 一次会话对话的加载结果。 */
-interface ConversationData {
-  readonly state: 'loading' | 'ok' | 'fail'
-  readonly messages: readonly TextMessage[]
-  /** 加载失败时的兜底节选（lastReply）。 */
-  readonly fallback: string | null
 }
 
 /** session.history 事件的最小结构面（与 host SessionEventLike 一致）。 */
@@ -109,6 +111,25 @@ interface QuestionItemLike {
   readonly multiSelect?: boolean
 }
 
+/** mux 流（/api/events.mux）帧的最小结构面。 */
+interface MuxFrameEnvelope {
+  readonly rpcId?: string
+  readonly payload?: {
+    readonly type?: string
+    readonly sessionId?: string
+    readonly questions?: readonly QuestionItemLike[]
+    readonly questionRpcId?: string
+    readonly approvalId?: string
+    readonly toolName?: string
+    readonly reason?: string
+  }
+}
+
+/** 应答载荷（client-response 的 result 槽）。 */
+type PendingResult =
+  | { ok: true; value: unknown }
+  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
+
 /** 一张子代理窗格的 DOM 引用。 */
 interface CardEl {
   readonly id: string
@@ -118,16 +139,24 @@ interface CardEl {
   readonly idEl: HTMLSpanElement
   readonly statusEl: HTMLSpanElement
   readonly silentEl: HTMLSpanElement
-  readonly actionEl: HTMLSpanElement
-  readonly replyEl: HTMLSpanElement
-  readonly waitingEl: HTMLSpanElement
-  readonly convBtnEl: HTMLButtonElement
   readonly openBtnEl: HTMLButtonElement
-  readonly collapseBtnEl: HTMLButtonElement
   readonly bodyEl: HTMLDivElement
-  readonly detailsEl: HTMLDivElement
-  readonly convEl: HTMLDivElement
   readonly convListEl: HTMLDivElement
+}
+
+/** 一个可应答的挂起交互（快照 PendingWait 与 mux 帧的统一面）。 */
+interface PendingFace {
+  readonly key: string
+  readonly sessionId: string
+  readonly kind: 'question' | 'approval'
+  /** question 载荷。 */
+  readonly questions?: readonly QuestionItemLike[]
+  /** approval 载荷。 */
+  readonly toolName?: string
+  readonly reason?: string
+  readonly approvalId?: string
+  /** 发送应答（true = 宿主接受）。 */
+  respond(result: PendingResult): Promise<boolean>
 }
 
 /** 全部样式（子代理 tab），一次性注入 <head>。前缀 swt- 与看板 swd-* 隔离。 */
@@ -332,6 +361,7 @@ const TAB_CSS = `
   white-space: nowrap;
 }
 .swt-right-head-hint { color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 10px; font-weight: 400; }
+/* 右侧 = 子代理「agent 容器」列表：每容器固定高度均分、内部滚动 */
 .swt-cards {
   flex: 1;
   min-height: 0;
@@ -350,13 +380,8 @@ const TAB_CSS = `
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-1, rgba(255, 255, 255, 0.03));
   overflow: hidden;
-  cursor: pointer;
 }
 .swt-card:hover { border-color: var(--dsw-alias-border-l2, rgba(154, 208, 255, 0.4)); }
-.swt-card.swt-opening { border-color: rgba(154, 208, 255, 0.65); }
-.swt-card.swt-open-failed { border-color: rgba(248, 113, 113, 0.75); }
-.swt-card.swt-expanded { flex: 1 1 auto; }
-.swt-card.swt-hidden { display: none; }
 .swt-card.swt-finished { opacity: 0.78; }
 .swt-card.swt-waiting {
   border-color: #fbbf24;
@@ -379,6 +404,17 @@ const TAB_CSS = `
 .swt-st-waiting { background: #fbbf24; }
 .swt-card-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .swt-card-id { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 10px; }
+.swt-card-status {
+  flex: none;
+  max-width: 34%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--dsw-alias-label-secondary, #9aa0a6);
+  font-size: 11px;
+}
+.swt-card-status.swt-stall { color: #f87171; font-weight: 700; }
+.swt-card-status.swt-waiting-val { color: #fbbf24; }
+.swt-card-silent { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); font-size: 11px; }
 .swt-card-btn {
   flex: none;
   cursor: pointer;
@@ -397,33 +433,11 @@ const TAB_CSS = `
 .swt-card-body {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
 }
-.swt-details { flex: none; padding: 4px 8px; overflow: visible; }
-.swt-detail-row { display: flex; gap: 6px; align-items: baseline; padding: 1px 0; }
-.swt-detail-label { flex: none; color: var(--dsw-alias-label-secondary, #9aa0a6); }
-.swt-detail-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.swt-card.swt-expanded .swt-detail-val { white-space: pre-wrap; word-break: break-word; }
-.swt-detail-val.swt-stall { color: #f87171; font-weight: 700; }
-.swt-detail-val.swt-waiting-val { color: #fbbf24; }
-.swt-detail-val.swt-reply { color: var(--dsw-alias-label-secondary, #8b93a1); }
-.swt-conv {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.08));
-}
-.swt-conv-head {
-  flex: none;
-  padding: 2px 8px;
-  font-size: 10px;
-  color: var(--dsw-alias-label-secondary, #9aa0a6);
-  border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(255, 255, 255, 0.06));
-}
-.swt-conv-list { flex: 1; min-height: 0; overflow: visible; padding: 6px 8px; }
+.swt-conv-list { flex: 1; padding: 6px 8px; }
 .swt-hint {
   color: var(--dsw-alias-label-secondary, #9aa0a6);
   text-align: center;
@@ -472,14 +486,13 @@ const TAB_CSS = `
   .swt-st-finished { background: #2563eb; }
   .swt-st-waiting { background: #d97706; }
   .swt-card-id { color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swt-card-status { color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swt-card-status.swt-stall { color: #dc2626; }
+  .swt-card-status.swt-waiting-val { color: #b45309; }
+  .swt-card-silent { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-card-btn { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-card-btn:hover { color: var(--dsw-alias-label-primary, #111827); background: rgba(0, 0, 0, 0.05); }
   .swt-card-btn.swt-btn-primary { color: var(--dsw-alias-brand-primary, #2563eb); }
-  .swt-detail-label { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swt-detail-val.swt-stall { color: #dc2626; }
-  .swt-detail-val.swt-waiting-val { color: #b45309; }
-  .swt-detail-val.swt-reply { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swt-conv-head { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-hint { color: var(--dsw-alias-label-secondary, #6b7280); }
   .swt-offline { color: #b45309; }
   .swt-empty { color: var(--dsw-alias-label-secondary, #6b7280); }
@@ -526,7 +539,7 @@ function collectMessages(nodes: readonly ConversationNode[]): TextMessage[] {
   return out
 }
 
-/** host RPC session.history：拿不到 binding 时的降级文本消息来源。 */
+/** host RPC session.history：子代理会话（无 binding）的文本消息来源。 */
 async function fetchSessionHistory(sessionId: string): Promise<TextMessage[] | null> {
   try {
     const res = await fetch('/api/session.history', {
@@ -561,6 +574,22 @@ async function fetchSessionHistory(sessionId: string): Promise<TextMessage[] | n
     return out
   } catch {
     return null
+  }
+}
+
+/** POST /api/respond：client-response 信封（宿主应答通道）。 */
+async function respondRpc(rpcId: string, result: PendingResult): Promise<boolean> {
+  try {
+    const res = await fetch('/api/respond', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-response', rpcId, result }),
+    })
+    if (!res.ok) return false
+    const body = await res.json() as { accepted?: boolean }
+    return body.accepted === true
+  } catch {
+    return false
   }
 }
 
@@ -727,6 +756,228 @@ function hintLine(text: string): HTMLDivElement {
   return el
 }
 
+/** 从快照行的 action.text（ask_user_question: {json}）解析提问内容（兜底展示用）。 */
+function questionsFromAction(row: AgentSnapshotRow): readonly QuestionItemLike[] | null {
+  if (row.action?.kind !== 'tool') return null
+  const idx = row.action.text.indexOf(':')
+  if (idx < 0) return null
+  const jsonText = row.action.text.slice(idx + 1).trim()
+  try {
+    const parsed = JSON.parse(jsonText) as { questions?: readonly QuestionItemLike[] }
+    return Array.isArray(parsed.questions) && parsed.questions.length > 0 ? parsed.questions : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 提问卡（选项单选/多选或自由文本 + 提交/取消）。应答协议照
+ * ui-user-questions PendingQuestion：respond{ok,value:{sessionId,answer}}。
+ * @param sel 选中态（${face.key}:${questionId} → label 集合，跨渲染保持）。
+ * @param inputs 无选项题目的自由文本输入（同上 key）。
+ * @param onAnswered 应答成功后回调（刷新所在区域）。
+ */
+function buildQuestionCard(
+  face: PendingFace,
+  sel: Map<string, Set<string>>,
+  inputs: Map<string, HTMLInputElement>,
+  onAnswered: () => void,
+): HTMLDivElement {
+  const items = face.questions ?? []
+  const card = document.createElement('div')
+  card.className = 'swt-qcard'
+  const head = document.createElement('div')
+  head.className = 'swt-qcard-head'
+  head.textContent = '❓ 等待你的判断'
+  const body = document.createElement('div')
+  body.className = 'swt-qcard-body'
+  const errEl = document.createElement('div')
+  errEl.className = 'swt-qcard-err'
+  errEl.style.display = 'none'
+  const actions = document.createElement('div')
+  actions.className = 'swt-qcard-actions'
+  const submit = document.createElement('button')
+  submit.type = 'button'
+  submit.className = 'swt-qcard-btn swt-qcard-primary'
+  submit.textContent = '提交'
+  const cancel = document.createElement('button')
+  cancel.type = 'button'
+  cancel.className = 'swt-qcard-btn'
+  cancel.textContent = '取消'
+  actions.appendChild(submit)
+  actions.appendChild(cancel)
+  card.appendChild(head)
+  card.appendChild(body)
+  card.appendChild(errEl)
+  card.appendChild(actions)
+
+  const busy = (b: boolean): void => {
+    submit.disabled = b
+    cancel.disabled = b
+  }
+  for (const item of items) {
+    const qEl = document.createElement('div')
+    qEl.className = 'swt-qcard-item'
+    const title = document.createElement('div')
+    title.className = 'swt-qcard-q'
+    const questionText = item.question ?? ''
+    title.textContent = item.header !== undefined && item.header !== ''
+      ? `${item.header}：${questionText}`
+      : questionText
+    qEl.appendChild(title)
+    if (item.detail !== undefined && item.detail !== '') {
+      const d = document.createElement('div')
+      d.className = 'swt-qcard-detail'
+      d.textContent = item.detail
+      qEl.appendChild(d)
+    }
+    const opts = item.options ?? []
+    const selKey = `${face.key}:${item.id ?? '?'}`
+    let selected = sel.get(selKey)
+    if (selected === undefined) {
+      selected = new Set()
+      sel.set(selKey, selected)
+    }
+    if (opts.length === 0) {
+      const input = document.createElement('input')
+      input.type = 'text'
+      input.className = 'swt-qcard-input'
+      input.placeholder = '输入你的回答…'
+      qEl.appendChild(input)
+      inputs.set(selKey, input)
+    } else {
+      const optionEls: HTMLButtonElement[] = []
+      const refresh = (): void => {
+        for (const oEl of optionEls) {
+          oEl.classList.toggle('selected', selected!.has(oEl.dataset.label ?? ''))
+        }
+        submit.disabled = items.every(it => {
+          const s = sel.get(`${face.key}:${it.id ?? '?'}`)
+          return (s === undefined || s.size === 0)
+        })
+      }
+      for (const opt of opts) {
+        const b = document.createElement('button')
+        b.type = 'button'
+        b.className = 'swt-qcard-option'
+        b.dataset.label = opt.label ?? ''
+        b.textContent = opt.label ?? ''
+        if (opt.description !== undefined) b.title = opt.description
+        b.addEventListener('click', () => {
+          const label = opt.label ?? ''
+          if (item.multiSelect === true) {
+            if (selected!.has(label)) selected!.delete(label)
+            else selected!.add(label)
+          } else {
+            selected!.clear()
+            selected!.add(label)
+          }
+          refresh()
+        })
+        optionEls.push(b)
+        qEl.appendChild(b)
+      }
+      refresh()
+    }
+    body.appendChild(qEl)
+  }
+  submit.addEventListener('click', () => {
+    busy(true)
+    errEl.style.display = 'none'
+    const answers = items.map(it => {
+      const key = `${face.key}:${it.id ?? '?'}`
+      const s = sel.get(key)
+      const input = inputs.get(key)
+      return {
+        id: it.id ?? '',
+        selected: s !== undefined ? [...s] : [],
+        ...(input !== undefined && input.value.trim() !== '' ? { custom: input.value.trim() } : {}),
+      }
+    })
+    void face.respond({ ok: true, value: { sessionId: face.sessionId, answer: { answers } } })
+      .then(accepted => {
+        if (!accepted) throw new Error('宿主拒绝了应答')
+        onAnswered()
+      })
+      .catch((e: unknown) => {
+        busy(false)
+        errEl.textContent = `提交失败：${e instanceof Error ? e.message : String(e)}`
+        errEl.style.display = 'block'
+      })
+  })
+  cancel.addEventListener('click', () => {
+    busy(true)
+    errEl.style.display = 'none'
+    void face.respond({
+      ok: false,
+      error: { code: 'cancelled', message: '用户取消了提问', details: {} },
+    })
+      .then(accepted => {
+        if (!accepted) throw new Error('宿主拒绝了取消')
+        onAnswered()
+      })
+      .catch((e: unknown) => {
+        busy(false)
+        errEl.textContent = `取消失败：${e instanceof Error ? e.message : String(e)}`
+        errEl.style.display = 'block'
+      })
+  })
+  return card
+}
+
+/** 审批卡：理由/工具名 + 允许一次/拒绝（应答协议照 ui-conversation ApprovalPanel）。 */
+function buildApprovalCard(face: PendingFace, onAnswered: () => void): HTMLDivElement {
+  const card = document.createElement('div')
+  card.className = 'swt-acard'
+  const head = document.createElement('div')
+  head.className = 'swt-acard-head'
+  head.textContent = '⏳ 等待批准'
+  const headline = document.createElement('div')
+  headline.className = 'swt-acard-headline'
+  headline.textContent = face.reason ?? `请求批准执行工具 ${face.toolName ?? ''}`
+  const errEl = document.createElement('div')
+  errEl.className = 'swt-acard-err'
+  errEl.style.display = 'none'
+  const actions = document.createElement('div')
+  actions.className = 'swt-acard-actions'
+  const reject = document.createElement('button')
+  reject.type = 'button'
+  reject.className = 'swt-acard-btn'
+  reject.textContent = '拒绝'
+  const allow = document.createElement('button')
+  allow.type = 'button'
+  allow.className = 'swt-acard-btn swt-acard-primary'
+  allow.textContent = '允许一次'
+  actions.appendChild(reject)
+  actions.appendChild(allow)
+  card.appendChild(head)
+  card.appendChild(headline)
+  card.appendChild(errEl)
+  card.appendChild(actions)
+  const answer = (outcome: 'allowed-once' | 'rejected'): void => {
+    reject.disabled = true
+    allow.disabled = true
+    errEl.style.display = 'none'
+    void face.respond({
+      ok: true,
+      value: { sessionId: face.sessionId, approvalId: face.approvalId ?? '', outcome },
+    })
+      .then(accepted => {
+        if (!accepted) throw new Error('宿主拒绝了应答')
+        onAnswered()
+      })
+      .catch((e: unknown) => {
+        reject.disabled = false
+        allow.disabled = false
+        errEl.textContent = `应答失败：${e instanceof Error ? e.message : String(e)}`
+        errEl.style.display = 'block'
+      })
+  }
+  reject.addEventListener('click', () => answer('rejected'))
+  allow.addEventListener('click', () => answer('allowed-once'))
+  return card
+}
+
 /**
  * 会话页「子代理」tab 注册：locale 字典 + conversation.view 槽位条目
  * （order 20，与「对话」「轨迹」同级）。
@@ -768,10 +1019,13 @@ export function SubagentTabView(
     controller.mount()
     return () => controller.dispose()
   }, [ctx, sessionId])
-  return <div ref={ref} className="swt-root" />
+  // data-conversation-composer-overlay：让会话容器把 viewArea 约束为固定高度
+  // （flex 1 1 0 + min-height 0 + overflow hidden），本视图内部滚动——否则
+  // 容器随内容无限长（与 TrajectoryView 同一机制）。
+  return <div ref={ref} className="swt-root" data-conversation-composer-overlay="" />
 }
 
-/** 子代理分屏视图控制器：布局 + 拖拽 + 轮询/SSE + 渲染。 */
+/** 子代理分屏视图控制器：布局 + 拖拽 + 轮询/SSE/mux + 渲染。 */
 class SubagentTabController {
   private readonly ctx: ClientContext
   private readonly sessionId: SessionId
@@ -787,30 +1041,35 @@ class SubagentTabController {
 
   /** id → 卡片 DOM。 */
   private readonly cards = new Map<string, CardEl>()
-  /** 卡片 id → 对话模式开启（监控卡 ↔ 对话流）。 */
-  private readonly convOn = new Set<string>()
-  /** 卡片 id → 对话加载结果缓存。 */
-  private readonly convData = new Map<string, ConversationData>()
-  /** 卡片 id → 会话 binding 订阅（dispose 时统一退订）。 */
-  private readonly convUnsubs = new Map<string, () => void>()
+  /** 子代理对话流缓存（session.history RPC 结果）。 */
+  private readonly cardConv = new Map<string, {
+    readonly msgs: readonly TextMessage[]
+    state: 'loading' | 'ok' | 'fail'
+    fetchedAt: number
+    lastActivity: number
+  }>()
+  /** 正在拉 history 的卡片 id（防并发重复请求）。 */
+  private readonly fetchingHistory = new Set<string>()
+  /** mux 注册表：sessionId → 挂起交互（rpcId 稳定，可原地应答）。 */
+  private readonly muxPending = new Map<string, PendingFace[]>()
+  /** 提问卡选中态：`${face.key}:${questionId}` → 已选 label 集合。 */
+  private readonly questionSel = new Map<string, Set<string>>()
+  /** 无选项提问的自由文本输入：`${face.key}:${questionId}` → input。 */
+  private readonly questionInputs = new Map<string, HTMLInputElement>()
   /** 主会话 binding 订阅。 */
   private leftUnsub: (() => void) | null = null
 
   private snapshot: AgentBoardSnapshot | null = null
-  /** 当前聚焦展开的卡片 id（null = 分屏均分）。 */
-  private expandedId: string | null = null
   /** 左栏宽度（px）。 */
   private leftWidth = 0
   /** 左栏是否粘底（有新消息自动滚到底）。 */
   private leftStickBottom = true
-  /** 提问卡选项选中态：`${wait.key}:${questionId}` → 已选 label 集合。 */
-  private readonly questionSel = new Map<string, Set<string>>()
-  /** 无选项提问的自由文本输入：`${wait.key}:${questionId}` → input。 */
-  private readonly questionInputs = new Map<string, HTMLInputElement>()
 
   private timer: number | undefined
   private fetching = false
   private sse: EventSource | null = null
+  private muxWs: WebSocket | null = null
+  private muxRetryTimer: number | undefined
   private disposed = false
   private visibilityCleanup: (() => void) | null = null
 
@@ -863,7 +1122,7 @@ class SubagentTabController {
     this.rightHeadCountEl.className = 'swt-right-head-hint'
     const rightHint = document.createElement('span')
     rightHint.className = 'swt-right-head-hint'
-    rightHint.textContent = '直属子代理（点击卡片展开聚焦）'
+    rightHint.textContent = '直属子代理 · 各自容器内滑动 · 挂起可原地应答'
     rightHead.appendChild(rightTitle)
     rightHead.appendChild(this.rightHeadCountEl)
     rightHead.appendChild(rightHint)
@@ -893,9 +1152,12 @@ class SubagentTabController {
     this.loadLeftConversation()
     this.poll()
     this.timer = window.setInterval(() => this.poll(), POLL_MS)
-    // SSE：数据变化即时刷新（EventSource 自动重连；失败退化为轮询兜底）。
+    // SSE：快照变化即时刷新（EventSource 自动重连；失败退化为轮询兜底）。
     this.sse = new EventSource('/api/agent-board/stream')
     this.sse.onmessage = () => this.poll()
+    // mux：挂起提问/审批注册表（连接即重放全部挂起帧，rpcId 稳定）——
+    // 子代理会话无 binding，这是原地应答的唯一通道。该路由仅支持 WebSocket。
+    this.connectMux()
     this.visibilityCleanup = this.watchVisibility()
     window.addEventListener('resize', this.onResize)
   }
@@ -908,13 +1170,17 @@ class SubagentTabController {
     }
     this.sse?.close()
     this.sse = null
+    if (this.muxRetryTimer !== undefined) {
+      window.clearTimeout(this.muxRetryTimer)
+      this.muxRetryTimer = undefined
+    }
+    this.muxWs?.close()
+    this.muxWs = null
     this.visibilityCleanup?.()
     this.visibilityCleanup = null
     window.removeEventListener('resize', this.onResize)
     this.leftUnsub?.()
     this.leftUnsub = null
-    for (const unsub of this.convUnsubs.values()) unsub()
-    this.convUnsubs.clear()
     // 只清内容不拆元素：root 由 React 持有，拆掉后 StrictMode 二次挂载会挂到
     // 已脱离文档的节点上。
     this.root.replaceChildren()
@@ -963,6 +1229,100 @@ class SubagentTabController {
     this.offlineEl.style.display = offline ? 'block' : 'none'
     this.cardsEl.style.display = offline ? 'none' : 'flex'
     this.emptyEl.style.display = 'none'
+  }
+
+  // ------------------------------------------------------------ mux 注册表
+
+  /** 连接 mux WebSocket（失败 1.5s 后自动重连；宿主在每次连接时重放挂起帧）。 */
+  private connectMux(): void {
+    if (this.disposed) return
+    try {
+      const url = new URL('/api/events.mux', window.location.href)
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+      const ws = new WebSocket(url)
+      this.muxWs = ws
+      ws.onmessage = (e) => this.onMuxMessage(e)
+      ws.onclose = () => {
+        if (this.muxWs !== ws) return
+        this.muxWs = null
+        if (!this.disposed && this.muxRetryTimer === undefined) {
+          this.muxRetryTimer = window.setTimeout(() => {
+            this.muxRetryTimer = undefined
+            this.connectMux()
+          }, 1500)
+        }
+      }
+      ws.onerror = () => { try { ws.close() } catch { /* 关闭由 onclose 接管重连 */ } }
+    } catch {
+      // WebSocket 不可用：降级为轮询 + 快照 waiting（无 rpcId 时提问卡只读展示）。
+    }
+  }
+
+  /** mux 帧：维护 sessionId → 挂起交互（question/approval，含稳定 rpcId）。 */
+  private readonly onMuxMessage = (e: MessageEvent): void => {
+    if (this.disposed) return
+    let frame: MuxFrameEnvelope
+    try {
+      frame = JSON.parse(e.data as string) as MuxFrameEnvelope
+    } catch {
+      return // 非 JSON 帧（如心跳注释行）忽略
+    }
+    const payload = frame.payload
+    if (payload === undefined || typeof payload.sessionId !== 'string') return
+    const sid = payload.sessionId
+    if (payload.type === 'question/requested') {
+      if (typeof frame.rpcId !== 'string') return
+      const entry: PendingFace = {
+        key: `q:${frame.rpcId}`,
+        sessionId: sid,
+        kind: 'question',
+        questions: payload.questions ?? [],
+        respond: (result) => respondRpc(frame.rpcId as string, result),
+      }
+      const list = (this.muxPending.get(sid) ?? []).filter(p => p.kind !== 'question')
+      list.push(entry)
+      this.muxPending.set(sid, list)
+      this.onPendingChanged(sid)
+    } else if (payload.type === 'question/resolved') {
+      const key = `q:${payload.questionRpcId ?? ''}`
+      const list = this.muxPending.get(sid)
+      if (list !== undefined) {
+        const kept = list.filter(p => p.key !== key)
+        if (kept.length === 0) this.muxPending.delete(sid)
+        else this.muxPending.set(sid, kept)
+        this.onPendingChanged(sid)
+      }
+    } else if (payload.type === 'approval/requested') {
+      if (typeof frame.rpcId !== 'string') return
+      const entry: PendingFace = {
+        key: `a:${payload.approvalId ?? frame.rpcId}`,
+        sessionId: sid,
+        kind: 'approval',
+        toolName: payload.toolName,
+        reason: payload.reason,
+        approvalId: payload.approvalId,
+        respond: (result) => respondRpc(frame.rpcId as string, result),
+      }
+      const list = (this.muxPending.get(sid) ?? []).filter(p => p.kind !== 'approval')
+      list.push(entry)
+      this.muxPending.set(sid, list)
+      this.onPendingChanged(sid)
+    } else if (payload.type === 'approval/resolved') {
+      const key = `a:${payload.approvalId ?? ''}`
+      const list = this.muxPending.get(sid)
+      if (list !== undefined) {
+        const kept = list.filter(p => p.key !== key)
+        if (kept.length === 0) this.muxPending.delete(sid)
+        else this.muxPending.set(sid, kept)
+        this.onPendingChanged(sid)
+      }
+    }
+  }
+
+  private onPendingChanged(sessionId: string): void {
+    if (this.disposed) return
+    // 主会话的挂起走 binding 快照渲染（事件驱动）；子代理卡片立即重排。
+    if (sessionId !== this.sessionId) this.reapplyCards()
   }
 
   // ------------------------------------------------------------ 分隔条拖拽
@@ -1072,19 +1432,16 @@ class SubagentTabController {
     this.syncCards(kept)
   }
 
-  /** 卡片集合对账：增删卡片 + 布局（展开/隐藏）+ 字段同步。 */
+  /** 卡片集合对账：增删卡片 + 头部字段 + 对话流刷新 + 挂起卡渲染。 */
   private syncCards(rows: readonly AgentSnapshotRow[]): void {
     const ids = new Set(rows.map(r => r.id))
-    // 移除消失的卡片（含对话订阅退订）。
+    // 移除消失的卡片。
     for (const [id, card] of this.cards) {
       if (ids.has(id)) continue
-      this.convUnsubs.get(id)?.()
-      this.convUnsubs.delete(id)
-      this.convOn.delete(id)
-      this.convData.delete(id)
+      this.cardConv.delete(id)
+      this.fetchingHistory.delete(id)
       card.root.remove()
       this.cards.delete(id)
-      if (this.expandedId === id) this.expandedId = null
     }
     // 新增卡片。
     for (const row of rows) {
@@ -1093,12 +1450,15 @@ class SubagentTabController {
       this.cards.set(row.id, card)
       this.cardsEl.appendChild(card.root)
     }
-    // 布局 + 字段。
+    // 头部字段 + 对话流 + 挂起卡。
     let running = 0
     for (const row of rows) {
       if (row.status === 'running') running++
       const card = this.cards.get(row.id)
-      if (card !== undefined) this.layoutCard(card, row)
+      if (card !== undefined) {
+        this.updateCardHead(card, row)
+        this.maybeRefreshConversation(card, row)
+      }
     }
     this.rightHeadCountEl.textContent = rows.length === 0 ? '· 0' : `· ${running}/${rows.length} 运行`
     // 空态：无直属子代理。
@@ -1119,123 +1479,31 @@ class SubagentTabController {
     const idEl = document.createElement('span')
     idEl.className = 'swt-card-id'
     idEl.textContent = row.id.slice(0, ID_PREFIX)
-    const collapseBtnEl = document.createElement('button')
-    collapseBtnEl.type = 'button'
-    collapseBtnEl.className = 'swt-card-btn'
-    collapseBtnEl.textContent = '▾ 收起'
-    collapseBtnEl.title = '返回分屏均分'
-    collapseBtnEl.style.display = 'none'
-    const convBtnEl = document.createElement('button')
-    convBtnEl.type = 'button'
-    convBtnEl.className = 'swt-card-btn swt-btn-primary'
-    convBtnEl.textContent = '对话'
-    convBtnEl.title = '切换监控卡 / 该子代理对话流'
+    const statusEl = document.createElement('span')
+    statusEl.className = 'swt-card-status'
+    const silentEl = document.createElement('span')
+    silentEl.className = 'swt-card-silent'
     const openBtnEl = document.createElement('button')
     openBtnEl.type = 'button'
-    openBtnEl.className = 'swt-card-btn'
+    openBtnEl.className = 'swt-card-btn swt-btn-primary'
     openBtnEl.textContent = '跳转'
     openBtnEl.title = '打开该子代理会话'
     head.appendChild(dotEl)
     head.appendChild(titleEl)
     head.appendChild(idEl)
-    head.appendChild(collapseBtnEl)
-    head.appendChild(convBtnEl)
+    head.appendChild(statusEl)
+    head.appendChild(silentEl)
     head.appendChild(openBtnEl)
 
     const body = document.createElement('div')
     body.className = 'swt-card-body'
-    const detailsEl = document.createElement('div')
-    detailsEl.className = 'swt-details'
-    const statusRow = document.createElement('div')
-    statusRow.className = 'swt-detail-row'
-    const statusLabel = document.createElement('span')
-    statusLabel.className = 'swt-detail-label'
-    statusLabel.textContent = '状态'
-    const statusEl = document.createElement('span')
-    statusEl.className = 'swt-detail-val'
-    statusRow.appendChild(statusLabel)
-    statusRow.appendChild(statusEl)
-    const actionRow = document.createElement('div')
-    actionRow.className = 'swt-detail-row'
-    const actionLabel = document.createElement('span')
-    actionLabel.className = 'swt-detail-label'
-    actionLabel.textContent = '动作'
-    const actionEl = document.createElement('span')
-    actionEl.className = 'swt-detail-val'
-    actionRow.appendChild(actionLabel)
-    actionRow.appendChild(actionEl)
-    const silentRow = document.createElement('div')
-    silentRow.className = 'swt-detail-row'
-    const silentLabel = document.createElement('span')
-    silentLabel.className = 'swt-detail-label'
-    silentLabel.textContent = '静默'
-    const silentEl = document.createElement('span')
-    silentEl.className = 'swt-detail-val'
-    silentRow.appendChild(silentLabel)
-    silentRow.appendChild(silentEl)
-    const replyRow = document.createElement('div')
-    replyRow.className = 'swt-detail-row'
-    const replyLabel = document.createElement('span')
-    replyLabel.className = 'swt-detail-label'
-    replyLabel.textContent = '最新答复'
-    const replyEl = document.createElement('span')
-    replyEl.className = 'swt-detail-val swt-reply'
-    replyRow.appendChild(replyLabel)
-    replyRow.appendChild(replyEl)
-    const waitingRow = document.createElement('div')
-    waitingRow.className = 'swt-detail-row'
-    const waitingLabel = document.createElement('span')
-    waitingLabel.className = 'swt-detail-label'
-    waitingLabel.textContent = '等待'
-    const waitingEl = document.createElement('span')
-    waitingEl.className = 'swt-detail-val swt-waiting-val'
-    waitingRow.appendChild(waitingLabel)
-    waitingRow.appendChild(waitingEl)
-    detailsEl.appendChild(statusRow)
-    detailsEl.appendChild(actionRow)
-    detailsEl.appendChild(silentRow)
-    detailsEl.appendChild(replyRow)
-    detailsEl.appendChild(waitingRow)
-
-    const conv = document.createElement('div')
-    conv.className = 'swt-conv'
-    conv.style.display = 'none'
-    const convHead = document.createElement('div')
-    convHead.className = 'swt-conv-head'
-    convHead.textContent = '对话流（文本消息）'
     const convList = document.createElement('div')
     convList.className = 'swt-conv-list'
-    conv.appendChild(convHead)
-    conv.appendChild(convList)
-
-    body.appendChild(detailsEl)
-    body.appendChild(conv)
+    body.appendChild(convList)
     root.appendChild(head)
     root.appendChild(body)
 
-    // 单击（非按钮）＝展开聚焦/收起；拖动（滚动）超过阈值不算点击。
-    let downX = 0
-    let downY = 0
-    root.addEventListener('pointerdown', (e) => {
-      downX = e.clientX
-      downY = e.clientY
-    })
-    root.addEventListener('click', (e) => {
-      if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > CLICK_MOVE_PX) return
-      this.toggleExpanded(row.id)
-    })
-    collapseBtnEl.addEventListener('click', (e) => {
-      e.stopPropagation()
-      this.toggleExpanded(row.id)
-    })
-    convBtnEl.addEventListener('click', (e) => {
-      e.stopPropagation()
-      this.toggleConversation(row.id)
-    })
-    openBtnEl.addEventListener('click', (e) => {
-      e.stopPropagation()
-      this.openSubagent(row)
-    })
+    openBtnEl.addEventListener('click', () => this.openSubagent(row))
 
     return {
       id: row.id,
@@ -1245,39 +1513,21 @@ class SubagentTabController {
       idEl,
       statusEl,
       silentEl,
-      actionEl,
-      replyEl,
-      waitingEl,
-      convBtnEl,
       openBtnEl,
-      collapseBtnEl,
       bodyEl: body,
-      detailsEl,
-      convEl: conv,
       convListEl: convList,
     }
   }
 
-  /** 卡片布局：展开/隐藏、监控卡 ↔ 对话流显隐、按钮文案。 */
-  private layoutCard(card: CardEl, row: AgentSnapshotRow): void {
-    const expanded = this.expandedId === card.id
-    // 对话流只在展开态生效（折叠态卡片是紧凑监控行，内容裁剪不滚动）。
-    const convOn = this.convOn.has(card.id) && expanded
-    card.root.classList.toggle('swt-expanded', expanded)
-    card.root.classList.toggle('swt-hidden', this.expandedId !== null && !expanded)
-    card.collapseBtnEl.style.display = expanded ? '' : 'none'
-    card.convBtnEl.textContent = convOn ? '监控' : '对话'
-    card.detailsEl.style.display = convOn ? 'none' : ''
-    card.convEl.style.display = convOn ? 'flex' : 'none'
-    // 卡片状态。
-    card.root.classList.toggle('swt-waiting', row.waiting !== undefined)
+  /** 卡片头：状态点/标题/状态/静默/等待高亮。 */
+  private updateCardHead(card: CardEl, row: AgentSnapshotRow): void {
+    const threshold = this.snapshot?.stallThresholdMs ?? 0
+    const { text, stalled } = statusText(row, threshold)
+    const waiting = row.waiting !== undefined
+    card.root.classList.toggle('swt-waiting', waiting)
     card.root.classList.toggle('swt-finished', row.status === 'finished')
-    // 状态行（statusText 复用 tree.ts：动作优先 > 停滞 > 完成 > 空闲）。
-    const { text, stalled } = statusText(row, this.snapshot?.stallThresholdMs ?? 0)
-    card.statusEl.textContent = text === '' ? (row.status === 'running' ? '运行中' : row.status) : text
-    card.statusEl.className = `swt-detail-val${stalled ? ' swt-stall' : ''}`
     // 状态色点（照 tree.ts stClass：等待→黄 / 停滞→红 / 完成→蓝(已读灰) / 运行→绿 / 空闲→灰）。
-    const stClass = row.waiting !== undefined ? 'swt-st-waiting'
+    const stClass = waiting ? 'swt-st-waiting'
       : stalled ? 'swt-st-stall'
       : row.status === 'finished' ? (isViewed(row.id) ? 'swt-st-idle' : 'swt-st-finished')
       : row.status === 'running' ? 'swt-st-running'
@@ -1285,51 +1535,13 @@ class SubagentTabController {
     card.dotEl.className = `swt-dot ${stClass}`
     // 标题：label 或 title 或 id 前 8 位。
     card.titleEl.textContent = row.label ?? row.title ?? row.id.slice(0, ID_PREFIX)
-    // 动作。
-    card.actionEl.textContent = row.action !== undefined
-      ? (row.action.kind === 'tool' ? row.action.text : '输出中…')
-      : '—'
+    // 状态文本（等待/动作/停滞/完成/空闲）。
+    card.statusEl.textContent = waiting
+      ? '🔔 等你判断'
+      : (text === '' ? (row.status === 'running' ? '运行中' : row.status) : text)
+    card.statusEl.className = `swt-card-status${waiting ? ' swt-waiting-val' : ''}${stalled ? ' swt-stall' : ''}`
     // 静默（仅 running 显示）。
-    card.silentEl.textContent = row.status === 'running' ? formatDuration(row.silentMs) : '—'
-    // 最新答复。
-    card.replyEl.textContent = row.lastReply ?? '—'
-    // 等待人工。
-    card.waitingEl.textContent = row.waiting ?? '—'
-    // 对话缓存：监控卡模式也要保证缓存存在（展开/切对话时即出）。
-    if (!this.convData.has(card.id)) this.convData.set(card.id, { state: 'loading', messages: [], fallback: null })
-    if (convOn) this.ensureConversation(card)
-  }
-
-  // ------------------------------------------------------------ 交互
-
-  private toggleExpanded(id: string): void {
-    this.expandedId = this.expandedId === id ? null : id
-    if (this.expandedId === id) {
-      // 展开聚焦：完整信息 + 对话区。
-      this.convOn.add(id)
-      const card = this.cards.get(id)
-      if (card !== undefined) this.ensureConversation(card)
-    }
-    this.reapplyCards()
-  }
-
-  private toggleConversation(id: string): void {
-    if (this.expandedId === id) {
-      // 已展开：监控卡 ↔ 对话流切换。
-      if (this.convOn.has(id)) this.convOn.delete(id)
-      else {
-        this.convOn.add(id)
-        const card = this.cards.get(id)
-        if (card !== undefined) this.ensureConversation(card)
-      }
-    } else {
-      // 折叠态点「对话」：直接展开聚焦并载入对话流（对话需要空间）。
-      this.expandedId = id
-      this.convOn.add(id)
-      const card = this.cards.get(id)
-      if (card !== undefined) this.ensureConversation(card)
-    }
-    this.reapplyCards()
+    card.silentEl.textContent = row.status === 'running' ? `静默 ${formatDuration(row.silentMs)}` : ''
   }
 
   /** 打开子代理会话（复用 tree.ts openBoardSession + 已读标记）。失败给红色反馈。 */
@@ -1348,13 +1560,119 @@ class SubagentTabController {
     })
   }
 
-  /** 展开/收起/对话切换后统一重排（用最近快照）。 */
+  // ------------------------------------------------------------ 卡片对话流
+
+  /** 子代理对话流：session.history RPC + 活动变化节流刷新（无 binding）。 */
+  private maybeRefreshConversation(card: CardEl, row: AgentSnapshotRow): void {
+    const cached = this.cardConv.get(card.id)
+    const needFetch = cached === undefined
+      || cached.state === 'fail'
+      || (cached.state === 'ok' && row.lastActivity !== cached.lastActivity
+        && Date.now() - cached.fetchedAt >= CARD_REFRESH_MIN_MS)
+    if (!needFetch) {
+      this.renderCardConversation(card, row)
+      return
+    }
+    if (this.fetchingHistory.has(card.id)) {
+      this.renderCardConversation(card, row)
+      return
+    }
+    this.fetchingHistory.add(card.id)
+    if (cached === undefined) {
+      this.cardConv.set(card.id, { msgs: [], state: 'loading', fetchedAt: 0, lastActivity: row.lastActivity })
+    }
+    this.renderCardConversation(card, row)
+    void fetchSessionHistory(card.id).then(msgs => {
+      this.fetchingHistory.delete(card.id)
+      if (this.disposed || !this.cards.has(card.id)) return
+      this.cardConv.set(card.id, {
+        msgs: msgs ?? [],
+        state: msgs !== null ? 'ok' : 'fail',
+        fetchedAt: Date.now(),
+        lastActivity: row.lastActivity,
+      })
+      this.renderCardConversation(card, row)
+    })
+  }
+
+  /** 立即重拉该卡片对话流（应答成功后刷新，让答案出现在对话里）。 */
+  private refreshCardConversationNow(card: CardEl, row: AgentSnapshotRow): void {
+    if (this.fetchingHistory.has(card.id)) return
+    this.fetchingHistory.add(card.id)
+    this.cardConv.set(card.id, { msgs: [], state: 'loading', fetchedAt: 0, lastActivity: row.lastActivity })
+    this.renderCardConversation(card, row)
+    void fetchSessionHistory(card.id).then(msgs => {
+      this.fetchingHistory.delete(card.id)
+      if (this.disposed || !this.cards.has(card.id)) return
+      this.cardConv.set(card.id, {
+        msgs: msgs ?? [],
+        state: msgs !== null ? 'ok' : 'fail',
+        fetchedAt: Date.now(),
+        lastActivity: row.lastActivity,
+      })
+      this.renderCardConversation(card, row)
+    })
+  }
+
+  /** 渲染卡片对话：消息 + 该子代理的挂起提问/审批卡（粘底滚动走卡片容器）。 */
+  private renderCardConversation(card: CardEl, row: AgentSnapshotRow): void {
+    if (this.disposed || !card.convListEl.isConnected) return
+    const body = card.bodyEl
+    const stick = body.scrollTop + body.clientHeight >= body.scrollHeight - 80
+    const list = card.convListEl
+    const cached = this.cardConv.get(card.id)
+    list.replaceChildren()
+    if (cached === undefined || cached.state === 'loading') {
+      list.appendChild(hintLine('加载对话…'))
+    } else if (cached.state === 'fail') {
+      list.appendChild(hintLine('对话不可用'))
+    } else if (cached.msgs.length === 0) {
+      list.appendChild(hintLine('该子代理暂无对话消息'))
+    } else {
+      for (const msg of cached.msgs) list.appendChild(renderMessage(msg))
+    }
+    // 挂起交互卡（mux 注册表；waiting 才展示；无注册项时从 action.text 兜底展示）。
+    this.renderCardPending(list, row)
+    if (stick) body.scrollTop = body.scrollHeight
+  }
+
+  private renderCardPending(list: HTMLDivElement, row: AgentSnapshotRow): void {
+    const entries = (this.muxPending.get(row.id) ?? []).filter(p => p.kind === 'question' || p.kind === 'approval')
+    if (row.waiting === undefined && entries.length === 0) return
+    const fallbackQuestions = questionsFromAction(row)
+    const faces: PendingFace[] = entries.length > 0
+      ? entries
+      : fallbackQuestions !== null
+        ? [{
+            key: `q:fallback:${row.id}`,
+            sessionId: row.id,
+            kind: 'question' as const,
+            questions: fallbackQuestions,
+            respond: async () => false, // 无 rpcId 不可应答（mux 连接后会补上）
+          }]
+        : []
+    for (const face of faces) {
+      const onAnswered = (): void => {
+        // 应答成功后：立即重拉对话流（答案进历史）+ 重排（挂起帧移除）。
+        const r = this.snapshot?.rows.find(x => x.id === row.id)
+        const c = this.cards.get(row.id)
+        if (c !== undefined && r !== undefined) this.refreshCardConversationNow(c, r)
+      }
+      if (face.kind === 'question') {
+        list.appendChild(buildQuestionCard(face, this.questionSel, this.questionInputs, onAnswered))
+      } else {
+        list.appendChild(buildApprovalCard(face, onAnswered))
+      }
+    }
+  }
+
+  /** 挂起变化后统一重排（用最近快照）。 */
   private reapplyCards(): void {
     if (this.snapshot === null) return
     this.applySnapshot(this.snapshot)
   }
 
-  // ------------------------------------------------------------ 对话流
+  // ------------------------------------------------------------ 主会话对话流
 
   /** 主会话对话流（左栏）：binding 订阅优先，降级 session.history RPC。 */
   private loadLeftConversation(): void {
@@ -1409,7 +1727,7 @@ class SubagentTabController {
     this.renderInteractions([])
   }
 
-  // ------------------------------------------------------------ 等待人工卡片
+  // ------------------------------------------------------------ 主会话交互卡
 
   private renderInteractions(pending: readonly PendingInteraction[]): void {
     if (this.disposed) return
@@ -1428,271 +1746,33 @@ class SubagentTabController {
     }
     this.interactEl.style.display = 'flex'
     for (const wait of pending) {
-      if (wait.kind === 'question') this.interactEl.appendChild(this.renderQuestionCard(wait))
-      else if (wait.kind === 'approval') this.interactEl.appendChild(this.renderApprovalCard(wait))
-    }
-  }
-
-  /** 提问卡：问题/详情/选项（单选或多选）/自由文本 + 提交/取消（应答协议照 ui-user-questions）。 */
-  private renderQuestionCard(wait: Extract<PendingInteraction, { kind: 'question' }>): HTMLDivElement {
-    const payload = wait.payload as { readonly questions?: readonly QuestionItemLike[] }
-    const items = payload.questions ?? []
-    const card = document.createElement('div')
-    card.className = 'swt-qcard'
-    const head = document.createElement('div')
-    head.className = 'swt-qcard-head'
-    head.textContent = '❓ 等待你的判断'
-    const body = document.createElement('div')
-    body.className = 'swt-qcard-body'
-    const errEl = document.createElement('div')
-    errEl.className = 'swt-qcard-err'
-    errEl.style.display = 'none'
-    const actions = document.createElement('div')
-    actions.className = 'swt-qcard-actions'
-    const submit = document.createElement('button')
-    submit.type = 'button'
-    submit.className = 'swt-qcard-btn swt-qcard-primary'
-    submit.textContent = '提交'
-    const cancel = document.createElement('button')
-    cancel.type = 'button'
-    cancel.className = 'swt-qcard-btn'
-    cancel.textContent = '取消'
-    actions.appendChild(submit)
-    actions.appendChild(cancel)
-    card.appendChild(head)
-    card.appendChild(body)
-    card.appendChild(errEl)
-    card.appendChild(actions)
-
-    const busy = (b: boolean): void => {
-      submit.disabled = b
-      cancel.disabled = b
-    }
-    // 每道题：选项按钮（multiSelect 可多选）或自由文本输入。
-    for (const item of items) {
-      const qEl = document.createElement('div')
-      qEl.className = 'swt-qcard-item'
-      const title = document.createElement('div')
-      title.className = 'swt-qcard-q'
-      const questionText = item.question ?? ''
-      title.textContent = item.header !== undefined && item.header !== ''
-        ? `${item.header}：${questionText}`
-        : questionText
-      qEl.appendChild(title)
-      if (item.detail !== undefined && item.detail !== '') {
-        const d = document.createElement('div')
-        d.className = 'swt-qcard-detail'
-        d.textContent = item.detail
-        qEl.appendChild(d)
+      const onAnswered = (): void => {
+        // 挂起帧已结算：binding 快照变化会驱动重渲染；这里主动拉一次。
+        const binding = this.ctx.sessions.binding(this.sessionId)
+        if (binding !== undefined) this.renderLeftFromSession(binding.session)
       }
-      const opts = item.options ?? []
-      const selKey = `${wait.key}:${item.id ?? '?'}`
-      let sel = this.questionSel.get(selKey)
-      if (sel === undefined) {
-        sel = new Set()
-        this.questionSel.set(selKey, sel)
-      }
-      if (opts.length === 0) {
-        const input = document.createElement('input')
-        input.type = 'text'
-        input.className = 'swt-qcard-input'
-        input.placeholder = '输入你的回答…'
-        qEl.appendChild(input)
-        this.questionInputs.set(selKey, input)
-      } else {
-        const optionEls: HTMLButtonElement[] = []
-        const refresh = (): void => {
-          for (const oEl of optionEls) {
-            oEl.classList.toggle('selected', sel!.has(oEl.dataset.label ?? ''))
-          }
-          submit.disabled = items.every(it => {
-            const s = this.questionSel.get(`${wait.key}:${it.id ?? '?'}`)
-            return (s === undefined || s.size === 0)
-          })
+      if (wait.kind === 'question') {
+        const face: PendingFace = {
+          key: wait.key,
+          sessionId: wait.sessionId,
+          kind: 'question',
+          questions: (wait.payload as { questions?: readonly QuestionItemLike[] }).questions ?? [],
+          respond: (result) => wait.respond(result as never).then(r => r.accepted === true),
         }
-        for (const opt of opts) {
-          const b = document.createElement('button')
-          b.type = 'button'
-          b.className = 'swt-qcard-option'
-          b.dataset.label = opt.label ?? ''
-          b.textContent = opt.label ?? ''
-          if (opt.description !== undefined) b.title = opt.description
-          b.addEventListener('click', () => {
-            const label = opt.label ?? ''
-            if (item.multiSelect === true) {
-              if (sel!.has(label)) sel!.delete(label)
-              else sel!.add(label)
-            } else {
-              sel!.clear()
-              sel!.add(label)
-            }
-            refresh()
-          })
-          optionEls.push(b)
-          qEl.appendChild(b)
+        this.interactEl.appendChild(buildQuestionCard(face, this.questionSel, this.questionInputs, onAnswered))
+      } else if (wait.kind === 'approval') {
+        const payload = wait.payload as { toolName?: string; reason?: string; approvalId?: string }
+        const face: PendingFace = {
+          key: wait.key,
+          sessionId: wait.sessionId,
+          kind: 'approval',
+          toolName: payload.toolName,
+          reason: payload.reason,
+          approvalId: payload.approvalId,
+          respond: (result) => wait.respond(result as never).then(r => r.accepted === true),
         }
-        refresh()
+        this.interactEl.appendChild(buildApprovalCard(face, onAnswered))
       }
-      body.appendChild(qEl)
     }
-    submit.addEventListener('click', () => {
-      busy(true)
-      errEl.style.display = 'none'
-      const answers = items.map(it => {
-        const key = `${wait.key}:${it.id ?? '?'}`
-        const s = this.questionSel.get(key)
-        const input = this.questionInputs.get(key)
-        return {
-          id: it.id ?? '',
-          selected: s !== undefined ? [...s] : [],
-          ...(input !== undefined && input.value.trim() !== '' ? { custom: input.value.trim() } : {}),
-        }
-      })
-      void wait.respond({ ok: true, value: { sessionId: wait.sessionId, answer: { answers } } })
-        .catch((e: unknown) => {
-          busy(false)
-          errEl.textContent = `提交失败：${e instanceof Error ? e.message : String(e)}`
-          errEl.style.display = 'block'
-        })
-    })
-    cancel.addEventListener('click', () => {
-      busy(true)
-      errEl.style.display = 'none'
-      void wait.respond({
-        ok: false,
-        error: { code: 'cancelled', message: '用户取消了提问', details: {} },
-      }).catch((e: unknown) => {
-        busy(false)
-        errEl.textContent = `取消失败：${e instanceof Error ? e.message : String(e)}`
-        errEl.style.display = 'block'
-      })
-    })
-    return card
-  }
-
-  /** 审批卡：理由/工具名 + 允许一次/拒绝（应答协议照 ui-conversation ApprovalPanel）。 */
-  private renderApprovalCard(wait: Extract<PendingInteraction, { kind: 'approval' }>): HTMLDivElement {
-    const payload = wait.payload as {
-      readonly toolName?: string
-      readonly reason?: string
-      readonly approvalId?: string
-    }
-    const card = document.createElement('div')
-    card.className = 'swt-acard'
-    const head = document.createElement('div')
-    head.className = 'swt-acard-head'
-    head.textContent = '⏳ 等待批准'
-    const headline = document.createElement('div')
-    headline.className = 'swt-acard-headline'
-    headline.textContent = payload.reason ?? `请求批准执行工具 ${payload.toolName ?? ''}`
-    const errEl = document.createElement('div')
-    errEl.className = 'swt-acard-err'
-    errEl.style.display = 'none'
-    const actions = document.createElement('div')
-    actions.className = 'swt-acard-actions'
-    const reject = document.createElement('button')
-    reject.type = 'button'
-    reject.className = 'swt-acard-btn'
-    reject.textContent = '拒绝'
-    const allow = document.createElement('button')
-    allow.type = 'button'
-    allow.className = 'swt-acard-btn swt-acard-primary'
-    allow.textContent = '允许一次'
-    actions.appendChild(reject)
-    actions.appendChild(allow)
-    card.appendChild(head)
-    card.appendChild(headline)
-    card.appendChild(errEl)
-    card.appendChild(actions)
-    const answer = (outcome: 'allowed-once' | 'rejected'): void => {
-      reject.disabled = true
-      allow.disabled = true
-      errEl.style.display = 'none'
-      void wait.respond({
-        ok: true,
-        value: { sessionId: wait.sessionId, approvalId: payload.approvalId ?? '', outcome },
-      }).catch((e: unknown) => {
-        reject.disabled = false
-        allow.disabled = false
-        errEl.textContent = `应答失败：${e instanceof Error ? e.message : String(e)}`
-        errEl.style.display = 'block'
-      })
-    }
-    reject.addEventListener('click', () => answer('rejected'))
-    allow.addEventListener('click', () => answer('allowed-once'))
-    return card
-  }
-
-  /** 子代理对话流：binding 订阅 → session.history RPC → lastReply 兜底。 */
-  private ensureConversation(card: CardEl): void {
-    const cached = this.convData.get(card.id)
-    if (cached !== undefined && cached.state !== 'loading') {
-      this.renderConversation(card, cached)
-      return
-    }
-    if (cached === undefined) {
-      this.convData.set(card.id, { state: 'loading', messages: [], fallback: null })
-    }
-    this.renderConversation(card, this.convData.get(card.id)!)
-    const binding = this.ctx.sessions.binding(card.id as SessionId)
-    if (binding !== undefined) {
-      if (!this.convUnsubs.has(card.id)) {
-        this.convUnsubs.set(card.id, binding.session.subscribe(() => {
-          const c = this.cards.get(card.id)
-          if (c === undefined) return
-          const data: ConversationData = {
-            state: 'ok',
-            messages: collectMessages(binding.session.getSnapshot().nodes),
-            fallback: null,
-          }
-          this.convData.set(card.id, data)
-          this.renderConversation(c, data)
-        }))
-      }
-      const data: ConversationData = {
-        state: 'ok',
-        messages: collectMessages(binding.session.getSnapshot().nodes),
-        fallback: null,
-      }
-      this.convData.set(card.id, data)
-      this.renderConversation(card, data)
-      return
-    }
-    // 降级：host RPC session.history。
-    void fetchSessionHistory(card.id).then(msgs => {
-      if (this.disposed || !this.cards.has(card.id)) return
-      const row = this.snapshot?.rows.find(r => r.id === card.id)
-      const data: ConversationData = msgs !== null
-        ? { state: 'ok', messages: msgs, fallback: null }
-        : { state: 'fail', messages: [], fallback: row?.lastReply ?? null }
-      this.convData.set(card.id, data)
-      const c = this.cards.get(card.id)
-      if (c !== undefined) this.renderConversation(c, data)
-    })
-  }
-
-  private renderConversation(card: CardEl, data: ConversationData): void {
-    if (this.disposed || !card.convEl.isConnected) return
-    const list = card.convListEl
-    // 单滚动条：面板容器滚动，粘底判断与滚动都走 cardsEl。
-    const pane = this.cardsEl
-    const stick = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 40
-    list.replaceChildren()
-    if (data.state === 'loading') {
-      list.appendChild(hintLine('加载对话…'))
-      return
-    }
-    if (data.state === 'fail') {
-      list.appendChild(hintLine(
-        data.fallback !== null ? `对话不可用 · 最新答复：${data.fallback}` : '对话不可用',
-      ))
-      return
-    }
-    if (data.messages.length === 0) {
-      list.appendChild(hintLine('该子代理暂无对话消息'))
-      return
-    }
-    for (const msg of data.messages) list.appendChild(renderMessage(msg))
-    if (stick) pane.scrollTop = pane.scrollHeight
   }
 }
