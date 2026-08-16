@@ -10,8 +10,9 @@
 /** 看板形态：悬浮窗 / 停靠右侧面板 / 两者并存。 */
 export type BoardMode = 'floating' | 'docked' | 'both'
 
-/** 看板字号档位（主字号 px；辅助元素字号自动降一档）。 */
-export type FloatingSize = 'small' | 'medium' | 'large'
+/** 看板字号范围（px，−/+ 步进 1 连续调节）。 */
+export const FONT_MIN = 9
+export const FONT_MAX = 16
 
 /** 持久化的看板状态（兼容旧版：top/right/visible/collapsed 语义不变）。 */
 export interface BoardState {
@@ -28,8 +29,8 @@ export interface BoardState {
   dockedWidth: number
   /** 停靠面板折叠为 0 宽（右侧出现展开按钮）。 */
   dockedCollapsed: boolean
-  /** 看板字号档位（标题栏 ▭ 按钮调节，悬浮窗与停靠面板共用）。 */
-  floatingSize: FloatingSize
+  /** 看板字号（px，标题栏 −/+ 按钮调节，悬浮窗与停靠面板共用）。 */
+  fontSize: number
 }
 
 /** localStorage key for the board state. */
@@ -46,9 +47,6 @@ export const TOGGLE_EVENT = 'dsh.agentBoard.toggle'
 /** 形态变更事件（detail: { mode?, visible? }，缺省字段保持不变）。 */
 export const MODE_EVENT = 'dsh.agentBoard.mode'
 
-/** 悬浮窗大小变更事件（detail: { size }）。 */
-export const SIZE_EVENT = 'dsh.agentBoard.size'
-
 /** 默认状态。 */
 export const DEFAULT_STATE: BoardState = {
   top: 64,
@@ -58,7 +56,7 @@ export const DEFAULT_STATE: BoardState = {
   mode: 'floating',
   dockedWidth: DOCKED_DEFAULT_WIDTH,
   dockedCollapsed: false,
-  floatingSize: 'medium',
+  fontSize: 11,
 }
 
 export function loadState(): BoardState {
@@ -77,7 +75,12 @@ export function loadState(): BoardState {
           ? Math.min(DOCKED_MAX_WIDTH, Math.max(DOCKED_MIN_WIDTH, parsed.dockedWidth))
           : DOCKED_DEFAULT_WIDTH,
         dockedCollapsed: parsed.dockedCollapsed === true,
-        floatingSize: parsed.floatingSize === 'medium' || parsed.floatingSize === 'large' ? parsed.floatingSize : 'small',
+        // 兼容旧档位字段（small/medium/large → 10/11/13px）。
+        fontSize: typeof parsed.fontSize === 'number'
+          ? Math.min(FONT_MAX, Math.max(FONT_MIN, parsed.fontSize))
+          : (parsed as Partial<{ floatingSize?: string }>).floatingSize === 'large' ? 13
+          : (parsed as Partial<{ floatingSize?: string }>).floatingSize === 'small' ? 10
+          : 11,
       }
     }
   } catch { /* corrupted state falls back to defaults */ }

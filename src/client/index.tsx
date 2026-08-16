@@ -39,10 +39,10 @@ import {
   saveState,
   TOGGLE_EVENT,
   MODE_EVENT,
-  SIZE_EVENT,
+  FONT_MIN,
+  FONT_MAX,
   type BoardMode,
   type BoardState,
-  type FloatingSize,
 } from './state.js'
 import { loadViewed, markViewed, openBoardSession, renderBoardTree } from './tree.js'
 
@@ -57,7 +57,8 @@ const TOGGLE_EVENT_NAME = TOGGLE_EVENT
 interface WidgetBoardActions {
   onOpen: (id: string, parentId?: string) => Promise<boolean>
   openModeMenu: (anchor: HTMLElement, onClose: () => void) => void
-  openSizeMenu: (anchor: HTMLElement, onClose: () => void) => void
+  /** 字号调节（delta ±1px）。 */
+  onFontChange: (delta: number) => void
   onHide: () => void
   onCollapsedChange: (collapsed: boolean) => void
 }
@@ -119,16 +120,18 @@ const WIDGET_CSS = `
   padding: 0 4px;
 }
 .swd-mode-btn:hover { color: #fff; }
-.swd-size-btn {
+.swd-font-btn {
   cursor: pointer;
   color: #9aa0a6;
   border: none;
   background: none;
   font-size: calc(var(--ab-font, 11px) + 1px);
   line-height: 1;
-  padding: 0 4px;
+  padding: 0 3px;
+  width: 16px;
+  text-align: center;
 }
-.swd-size-btn:hover { color: #fff; }
+.swd-font-btn:hover { color: #fff; }
 .swd-body { overflow-y: auto; padding: 6px 8px; }
 .swd-tree { margin: 0; padding: 0; list-style: none; }
 /* 子代理层级：每层 28px 缩进 + 树线（根行有 ▸ 占位约 15px，加大缩进保证层级错开明显） */
@@ -250,35 +253,6 @@ const WIDGET_CSS = `
 }
 .swd-mode-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(154, 208, 255, 0.14)); }
 .swd-mode-item.active { color: var(--dsw-alias-brand-primary, #9ad0ff); font-weight: 700; }
-.swd-size-menu {
-  position: fixed;
-  z-index: 2147483647;
-  min-width: 160px;
-  padding: 4px;
-  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color: var(--dsw-alias-label-primary, #e6e6e6);
-  background: var(--dsw-alias-bg-overlay, rgba(17, 17, 20, 0.97));
-  border: 1px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.14));
-  border-radius: 8px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
-}
-.swd-size-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 5px 8px;
-  background: none;
-  border: none;
-  color: var(--dsw-alias-label-primary, #d7dde3);
-  text-align: left;
-  cursor: pointer;
-  border-radius: 5px;
-  font: inherit;
-  white-space: nowrap;
-}
-.swd-size-item:hover { background: var(--dsw-alias-bg-layer-2, rgba(154, 208, 255, 0.14)); }
-.swd-size-item.active { color: var(--dsw-alias-brand-primary, #9ad0ff); font-weight: 700; }
 /* ===== 停靠右侧面板（跟随 shell 主题令牌） ===== */
 .swd-dock-col {
   display: flex;
@@ -366,11 +340,8 @@ const WIDGET_CSS = `
   .swd-close:hover { color: #111827; }
   .swd-mode-btn { color: #6b7280; }
   .swd-mode-btn:hover { color: #111827; }
-  .swd-size-btn { color: #6b7280; }
-  .swd-size-btn:hover { color: #111827; }
-  .swd-size-item { color: #374151; }
-  .swd-size-item:hover { background: rgba(37, 99, 235, 0.1); }
-  .swd-size-item.active { color: #2563eb; }
+  .swd-font-btn { color: #6b7280; }
+  .swd-font-btn:hover { color: #111827; }
   .swd-tree ul { border-left: 1px dashed rgba(37, 99, 235, 0.3); }
   .swd-node:hover { background: rgba(37, 99, 235, 0.08); }
   .swd-opening { background: rgba(37, 99, 235, 0.16); }
@@ -463,54 +434,6 @@ const MODE_LABELS: Record<BoardMode | 'hidden', string> = {
   hidden: '隐藏',
 }
 
-/** 看板字号档位：主字号（px）与辅助元素字号（px）。 */
-const SIZE_PRESETS: Record<FloatingSize, { font: number; sub: number; label: string }> = {
-  small: { font: 10, sub: 9, label: '小 · 10px' },
-  medium: { font: 11, sub: 10, label: '中 · 11px' },
-  large: { font: 13, sub: 12, label: '大 · 13px' },
-}
-
-const SIZE_MENU_ITEMS: readonly FloatingSize[] = ['small', 'medium', 'large']
-
-/** 在锚点元素下方弹出看板字号菜单；选择即落盘并广播 SIZE_EVENT。 */
-function openSizeMenu(anchor: HTMLElement, onClose: () => void): void {
-  const current = loadState().floatingSize
-  const menu = document.createElement('div')
-  menu.className = 'swd-size-menu'
-  for (const size of SIZE_MENU_ITEMS) {
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = `swd-size-item${size === current ? ' active' : ''}`
-    btn.textContent = SIZE_PRESETS[size].label
-    btn.addEventListener('click', () => {
-      close()
-      const s = loadState()
-      s.floatingSize = size
-      saveState(s)
-      document.dispatchEvent(new CustomEvent(SIZE_EVENT, { detail: { size } }))
-    })
-    menu.appendChild(btn)
-  }
-  document.body.appendChild(menu)
-  const rect = anchor.getBoundingClientRect()
-  menu.style.top = `${Math.max(4, Math.min(rect.bottom + 4, window.innerHeight - menu.offsetHeight - 8))}px`
-  menu.style.right = `${Math.max(4, window.innerWidth - rect.right)}px`
-  const close = (): void => {
-    document.removeEventListener('pointerdown', onPointer, true)
-    window.removeEventListener('keydown', onKey)
-    menu.remove()
-    onClose()
-  }
-  const onPointer = (e: PointerEvent): void => {
-    if (!menu.contains(e.target as Node)) close()
-  }
-  const onKey = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape') close()
-  }
-  document.addEventListener('pointerdown', onPointer, true)
-  window.addEventListener('keydown', onKey)
-}
-
 /** 当前形态（hidden = 隐藏）。 */
 function currentModeValue(state: BoardState): BoardMode | 'hidden' {
   return state.visible ? state.mode : 'hidden'
@@ -596,7 +519,7 @@ class AgentBoardWidget {
     this.root.className = 'swd-widget'
     this.root.style.top = `${this.state.top}px`
     this.root.style.right = `${this.state.right}px`
-    this.applyFontSize(this.state.floatingSize)
+    this.applyFontSize(this.state.fontSize)
 
     this.titleTextEl = document.createElement('span')
     this.titleTextEl.className = 'swd-title-left'
@@ -611,13 +534,21 @@ class AgentBoardWidget {
       this.actions.openModeMenu(modeBtn, () => { /* 菜单自行管理关闭 */ })
     })
 
-    const sizeBtn = document.createElement('span')
-    sizeBtn.className = 'swd-size-btn'
-    sizeBtn.textContent = '▭'
-    sizeBtn.title = '调节看板字号（小 / 中 / 大）'
-    sizeBtn.addEventListener('click', (e) => {
+    const fontMinusBtn = document.createElement('span')
+    fontMinusBtn.className = 'swd-font-btn'
+    fontMinusBtn.textContent = '−'
+    fontMinusBtn.title = '减小字号（当前 ' + this.state.fontSize + 'px）'
+    fontMinusBtn.addEventListener('click', (e) => {
       e.stopPropagation()
-      this.actions.openSizeMenu(sizeBtn, () => { /* 菜单自行管理关闭 */ })
+      this.actions.onFontChange(-1)
+    })
+    const fontPlusBtn = document.createElement('span')
+    fontPlusBtn.className = 'swd-font-btn'
+    fontPlusBtn.textContent = '+'
+    fontPlusBtn.title = '增大字号（当前 ' + this.state.fontSize + 'px）'
+    fontPlusBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      this.actions.onFontChange(1)
     })
 
     const closeBtn = document.createElement('span')
@@ -633,12 +564,13 @@ class AgentBoardWidget {
     this.titleBarEl.className = 'swd-title'
     this.titleBarEl.title = 'Agent 看板（拖动移动 · 点击折叠/展开）'
     this.titleBarEl.appendChild(this.titleTextEl)
-    this.titleBarEl.appendChild(sizeBtn)
+    this.titleBarEl.appendChild(fontMinusBtn)
+    this.titleBarEl.appendChild(fontPlusBtn)
     this.titleBarEl.appendChild(modeBtn)
     this.titleBarEl.appendChild(closeBtn)
     this.titleBarEl.addEventListener('pointerdown', (e) => this.beginDrag(e))
     this.titleBarEl.addEventListener('click', (e) => {
-      if (e.target === closeBtn || e.target === modeBtn || e.target === sizeBtn) return
+      if (e.target === closeBtn || e.target === modeBtn || e.target === fontMinusBtn || e.target === fontPlusBtn) return
       if (this.suppressClick) {
         this.suppressClick = false
         return
@@ -694,11 +626,10 @@ class AgentBoardWidget {
     this.bodyEl.style.display = this.state.collapsed ? 'none' : 'block'
   }
 
-  /** 应用字号档位（CSS 变量，悬浮窗与停靠面板共用同一档位）。 */
-  applyFontSize(size: FloatingSize): void {
-    const preset = SIZE_PRESETS[size]
-    this.root.style.setProperty('--ab-font', `${preset.font}px`)
-    this.root.style.setProperty('--ab-font-sub', `${preset.sub}px`)
+  /** 应用字号（px，CSS 变量；辅助元素字号自动降 1px）。 */
+  applyFontSize(size: number): void {
+    this.root.style.setProperty('--ab-font', `${size}px`)
+    this.root.style.setProperty('--ab-font-sub', `${Math.max(8, size - 1)}px`)
   }
 
   /** 离线提示（App 在传输失败时调用）。 */
@@ -731,7 +662,7 @@ class AgentBoardWidget {
   }
 
   private beginDrag(e: PointerEvent): void {
-    if (e.target instanceof Element && (e.target.classList.contains('swd-close') || e.target.classList.contains('swd-mode-btn') || e.target.classList.contains('swd-size-btn'))) return
+    if (e.target instanceof Element && (e.target.classList.contains('swd-close') || e.target.classList.contains('swd-mode-btn') || e.target.classList.contains('swd-font-btn'))) return
     this.dragging = true
     this.dragMoved = false
     this.dragPointerId = e.pointerId
@@ -793,7 +724,7 @@ class AgentBoardApp {
     const widgetActions: WidgetBoardActions = {
       onOpen: (id, parentId) => this.openSession(id, parentId),
       openModeMenu,
-      openSizeMenu,
+      onFontChange: (delta) => this.adjustFontSize(delta),
       onHide: () => {
         // × 只关闭悬浮窗：并存时切到停靠形态；单形态时才整体隐藏。
         if (this.state.mode === 'both') {
@@ -846,7 +777,6 @@ class AgentBoardApp {
     // 事件总线（监听器绑定为类字段，dispose 时可移除）。
     document.addEventListener(TOGGLE_EVENT_NAME, this.onToggleEvent)
     document.addEventListener(MODE_EVENT, this.onModeEvent as EventListener)
-    document.addEventListener(SIZE_EVENT, this.onSizeEvent as EventListener)
   }
 
   mount(): void {
@@ -854,7 +784,7 @@ class AgentBoardApp {
     this.widget.mount()
     this.docked.mount()
     // 初始字号应用到双形态（悬浮窗构造时已应用，停靠面板在此补上）。
-    this.docked.applyFontSize(this.state.floatingSize)
+    this.docked.applyFontSize(this.state.fontSize)
 
     // 会话切换（current 变化）即时重渲染，「当前」标记不等轮询周期；
     // 只在 current 变化时重建（其他订阅通知不触发，减少主线程负担）。
@@ -887,7 +817,6 @@ class AgentBoardApp {
     this.removeSummon()
     document.removeEventListener(TOGGLE_EVENT_NAME, this.onToggleEvent)
     document.removeEventListener(MODE_EVENT, this.onModeEvent as EventListener)
-    document.removeEventListener(SIZE_EVENT, this.onSizeEvent as EventListener)
   }
 
   private readonly onToggleEvent = (): void => {
@@ -913,14 +842,15 @@ class AgentBoardApp {
     this.sync()
   }) as EventListener
 
-  /** 字号档位变更：落盘 + 应用到悬浮窗与停靠面板。 */
-  private readonly onSizeEvent = ((e: CustomEvent<{ size: FloatingSize }>) => {
-    if (e.detail.size === undefined) return
-    this.state.floatingSize = e.detail.size
+  /** 字号步进调节（−/+）：夹取范围 → 落盘 → 应用到悬浮窗与停靠面板。 */
+  private adjustFontSize(delta: number): void {
+    const next = Math.min(FONT_MAX, Math.max(FONT_MIN, this.state.fontSize + delta))
+    if (next === this.state.fontSize) return
+    this.state.fontSize = next
     saveState(this.state)
-    this.widget.applyFontSize(e.detail.size)
-    this.docked.applyFontSize(e.detail.size)
-  }) as EventListener
+    this.widget.applyFontSize(next)
+    this.docked.applyFontSize(next)
+  }
 
   /** 设置总开关并同步双形态。打开时自动展开（清折叠态）——
    *  用户点「Agent 看板」期望看到内容，不留「只剩一条线」的折叠残留。 */
