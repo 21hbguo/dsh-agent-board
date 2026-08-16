@@ -166,6 +166,8 @@ const WIDGET_CSS = `
 .swd-node:hover { background: rgba(154, 208, 255, 0.12); }
 /* 点击瞬间反馈：跳转渲染前先高亮（打开中） */
 .swd-opening { background: rgba(154, 208, 255, 0.22); }
+/* 跳转彻底失败：红色提示（会话可能已不存在） */
+.swd-open-failed { background: rgba(248, 113, 113, 0.28); }
 .swd-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
 /* 状态色（实心 = 主 agent，空心 = 子代理） */
 .swd-st-running { background: #4ade80; border-color: #4ade80; }
@@ -312,7 +314,7 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
 function renderNode(
   node: TreeNode,
   threshold: number,
-  onOpen: (id: string, parentId?: string) => void,
+  onOpen: (id: string, parentId?: string) => Promise<boolean>,
   opts: { isRoot?: boolean; isCurrent?: boolean; currentId?: string; idx?: number; collapsed?: boolean; onToggle?: () => void } = {},
 ): HTMLLIElement {
   const { row } = node
@@ -329,7 +331,14 @@ function renderNode(
     e.stopPropagation()
     // 立即视觉反馈：主线程忙时跳转渲染可能滞后，高亮先让用户知道点中了。
     line.classList.add('swd-opening')
-    onOpen(row.id, row.parentSession)
+    void onOpen(row.id, row.parentSession).then(ok => {
+      // 跳转彻底失败（会话不在宿主列表等）：红色提示，避免「点击无反应」。
+      if (ok !== true) {
+        line.classList.remove('swd-opening')
+        line.classList.add('swd-open-failed')
+        line.title = '打开会话失败（会话可能已不存在），稍后重试'
+      }
+    })
   })
   const { text, stalled } = statusText(row, threshold)
   const stClass = stalled ? 'swd-st-stall'
@@ -444,8 +453,10 @@ async function findChildMode(parentId: string, childId: string): Promise<'contin
  *  ① 已有 catalog 地址 → openSubagent（0 请求）；
  *  ② 子代理快速路径：同步 open 立即跳转（与侧边栏同速），后台补 catalog/地址；
  *  ③ 慢路径兜底：并行拉 catalog + mode 再 openSubagent；
- *  ④ 根会话：同步 open。 */
-async function openSession(ctx: ClientContext, id: string, parentId: string | undefined): Promise<void> {
+ *  ④ 普通 open，失败则刷新会话列表后重试一次（看板快照是 host 全局的，
+ *  目标会话可能不在 client 列表——跨项目冷会话/新会话；侧边栏只列列表内会话所以从不触发）。
+ *  @returns 是否跳转成功（false 时调用方应给出可见反馈，避免「点击无反应」）。 */
+async function openSession(ctx: ClientContext, id: string, parentId: string | undefined): Promise<boolean> {
   const tryAddress = (address: { parentSessionId: string; childSessionId: string; mode: 'continuable' | 'one-shot' }): boolean => {
     try {
       ctx.sessions.openSubagent(address)
@@ -454,7 +465,7 @@ async function openSession(ctx: ClientContext, id: string, parentId: string | un
   }
   // ① 已有导航地址
   const known = ctx.sessions.subagentAddress(id)
-  if (known !== undefined && tryAddress(known)) return
+  if (known !== undefined && tryAddress(known)) return true
   // ② 子代理快速路径：先同步打开（立即跳转），后台补 catalog/地址
   if (parentId !== undefined) {
     let opened = false
@@ -472,7 +483,7 @@ async function openSession(ctx: ClientContext, id: string, parentId: string | un
           if (mode !== undefined) tryAddress({ parentSessionId: parentId, childSessionId: id, mode })
         } catch { /* 后台补地址失败不影响已完成的跳转 */ }
       })()
-      return
+      return true
     }
     // ③ 慢路径兜底：并行拉 catalog + mode
     await Promise.all([
@@ -480,12 +491,20 @@ async function openSession(ctx: ClientContext, id: string, parentId: string | un
       findChildMode(parentId, id),
     ])
     const mode = await findChildMode(parentId, id) // 缓存命中，0 请求
-    if (mode !== undefined && tryAddress({ parentSessionId: parentId, childSessionId: id, mode })) return
+    if (mode !== undefined && tryAddress({ parentSessionId: parentId, childSessionId: id, mode })) return true
   }
-  // ④ 普通 open（顶层会话；子代理会话不在列表时可能抛错，静默）
+  // ④ 普通 open（顶层会话；子代理会话不在列表时可能抛错）
   try {
     ctx.sessions.open(id)
-  } catch { /* unknown session：静默，避免打断看板 */ }
+    return true
+  } catch {
+    // 补救：刷新会话列表（host 全局列表，含跨项目/新会话）后重试一次。
+    try {
+      await (ctx.sessions as unknown as { refresh(): Promise<void> }).refresh()
+      ctx.sessions.open(id)
+      return true
+    } catch { return false } // 仍失败：调用方给出可见反馈
+  }
 }
 
 /** 常驻悬浮窗：树形展示子代理层级 + 状态。 */
@@ -810,9 +829,9 @@ class AgentBoardWidget {
   }
 
   /** 点击节点跳转会话。双击打开 = 已查看：完成节点标记已读（蓝→灰/空闲）。 */
-  private openSession(id: string, parentId?: string): void {
+  private openSession(id: string, parentId?: string): Promise<boolean> {
     markViewed(id)
-    void openSession(this.ctx, id, parentId)
+    return openSession(this.ctx, id, parentId)
   }
 }
 
