@@ -305,6 +305,8 @@ const WIDGET_CSS = `
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
 }
 .swd-dock-expand:hover { color: var(--dsw-alias-label-primary, #fff); }
+/* 我们改轨道瞬间禁用 shell 的 grid 过渡（拖拽/折叠跟手） */
+.swd-instant-grid { transition: none !important; }
 /* ===== 浅色主题（令牌缺失时按系统明暗回退） ===== */
 @media (prefers-color-scheme: light) {
   .swd-widget {

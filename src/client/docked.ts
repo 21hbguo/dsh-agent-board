@@ -96,6 +96,7 @@ class DockedLayout {
   private dragPointerId = 0
   private dragStartX = 0
   private dragStartWidth = 0
+  private instantTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(private readonly deps: {
     getWidth(): number
@@ -109,14 +110,52 @@ class DockedLayout {
   /** 挂载：等待 frame 出现后附加列与观察器。 @param col 面板列（由面板创建）。 */
   mount(col: HTMLDivElement): void {
     const tryAttach = (): void => {
-      if (this.frame !== null) return
-      const frame = findFrame()
-      if (frame === null) return
-      this.attach(frame, col)
+      // frame 被 React 重建（会话切换等导致 shell 重挂布局）后，列与观察器
+      // 都挂在旧 frame 上随之失效——检测到 frame 脱离 DOM / 列被移出即重挂。
+      if (this.frame !== null) {
+        if (!document.contains(this.frame) || (this.col !== null && !this.col.isConnected)) {
+          this.detach()
+        }
+      }
+      if (this.frame === null) {
+        const frame = findFrame()
+        if (frame === null) return
+        this.attach(frame, this.col ?? col)
+      }
     }
     this.waitObserver = new MutationObserver(() => { tryAttach() })
     this.waitObserver.observe(document.body, { childList: true, subtree: true })
     tryAttach()
+  }
+
+  /** 拆除挂载（观察器/把手/按钮/网格恢复），保留面板列 DOM 供重挂。 */
+  private detach(): void {
+    this.styleObserver?.disconnect()
+    this.styleObserver = null
+    this.sizeObserver?.disconnect()
+    this.sizeObserver = null
+    this.handle?.remove()
+    this.handle = null
+    this.expandBtn?.remove()
+    this.expandBtn = null
+    if (this.frame !== null) {
+      // 按「当前实际网格」去掉我们的末尾轨道恢复——不覆盖 React 刚写的新宽度。
+      const tracks = parseGridTracks(this.frame.style.gridTemplateColumns)
+      if (tracks.length === 4) {
+        this.frame.style.gridTemplateColumns = tracks.slice(0, 3).join(' ')
+      } else if (tracks.length === 6) {
+        this.frame.style.gridTemplateColumns = tracks.slice(0, 5).join(' ')
+      }
+    }
+    this.frame = null
+    this.shellTracks = []
+    this.extraTracks = []
+    this.lastApplied = ''
+    this.frameWidth = 0
+    if (this.instantTimer !== undefined) {
+      clearTimeout(this.instantTimer)
+      this.instantTimer = undefined
+    }
   }
 
   private attach(frame: HTMLElement, col: HTMLDivElement): void {
@@ -212,6 +251,9 @@ class DockedLayout {
     const width = this.deps.isVisible() && !this.deps.isCollapsed() ? Math.round(this.deps.getWidth()) : 0
     const grid = [...this.shellTracks, ...this.extraTracks, `${width}px`].join(' ')
     if (grid === this.lastApplied) return
+    // 我们自己改轨道（拖拽/折叠/展开）时禁用 shell 的 grid 过渡，
+    // 否则 300ms 缓动让把手/内容跟不上指针（aionui 同款处理）。
+    this.instant(frame)
     this.lastApplied = grid
     frame.style.gridTemplateColumns = grid
     if (this.col !== null) {
@@ -226,6 +268,16 @@ class DockedLayout {
       // 仅「可见且折叠为 0 宽」时出现；整体隐藏时由召唤按钮接管。
       this.expandBtn.style.display = this.deps.isVisible() && this.deps.isCollapsed() ? 'flex' : 'none'
     }
+  }
+
+  /** 本次写轨道的瞬间禁用 grid 过渡（一帧后恢复）。 */
+  private instant(frame: HTMLElement): void {
+    frame.classList.add('swd-instant-grid')
+    if (this.instantTimer !== undefined) clearTimeout(this.instantTimer)
+    this.instantTimer = setTimeout(() => {
+      this.instantTimer = undefined
+      frame.classList.remove('swd-instant-grid')
+    }, 0)
   }
 
   private beginDrag(e: PointerEvent): void {
@@ -258,18 +310,8 @@ class DockedLayout {
   /** 卸载即净：断开观察器、移除把手/按钮，把网格恢复为 shell（+中间轨）。 */
   dispose(): void {
     this.waitObserver?.disconnect()
-    this.styleObserver?.disconnect()
-    this.sizeObserver?.disconnect()
-    this.handle?.remove()
-    this.expandBtn?.remove()
-    if (this.frame !== null && this.shellTracks.length === 3) {
-      // 移除我们的轨道，恢复 shell（+aionui 中间轨）原网格。
-      const restored = [...this.shellTracks, ...this.extraTracks].join(' ')
-      if (restored !== this.frame.style.gridTemplateColumns) {
-        this.frame.style.gridTemplateColumns = restored
-      }
-    }
-    this.frame = null
+    this.waitObserver = null
+    this.detach()
   }
 }
 
