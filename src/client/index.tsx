@@ -153,29 +153,16 @@ const WIDGET_CSS = `
 /* 四角 resize 手柄：拖拽调整悬浮窗大小 */
 .swd-resize {
   position: absolute;
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 18px;
   z-index: 3;
   touch-action: none;
+  /* 无视觉手柄：四角仅为拖拽热区，鼠标移入显示 resize 光标 */
 }
 .swd-resize-nw { top: 0; left: 0; cursor: nwse-resize; }
 .swd-resize-ne { top: 0; right: 0; cursor: nesw-resize; }
 .swd-resize-sw { bottom: 0; left: 0; cursor: nesw-resize; }
 .swd-resize-se { bottom: 0; right: 0; cursor: nwse-resize; }
-.swd-resize::after {
-  content: '';
-  position: absolute;
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  background: rgba(154, 208, 255, 0.45);
-  transition: background 0.15s, transform 0.15s;
-}
-.swd-resize-nw::after { top: 2px; left: 2px; }
-.swd-resize-ne::after { top: 2px; right: 2px; }
-.swd-resize-sw::after { bottom: 2px; left: 2px; }
-.swd-resize-se::after { bottom: 2px; right: 2px; }
-.swd-widget:hover .swd-resize::after { background: rgba(154, 208, 255, 0.85); transform: scale(1.15); }
 .swd-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
 /* 状态色（实心 = 主 agent，空心 = 子代理） */
 .swd-st-running { background: #4ade80; border-color: #4ade80; }
@@ -395,8 +382,7 @@ const WIDGET_CSS = `
   .swd-offline { color: #b45309; }
   .swd-empty { color: #6b7280; }
   .swd-excerpt-inline { color: #6b7280; }
-  .swd-resize::after { background: rgba(37, 99, 235, 0.4); }
-  .swd-widget:hover .swd-resize::after { background: rgba(37, 99, 235, 0.85); }
+
   .swd-summon {
     color: #2563eb;
     background: rgba(255, 255, 255, 0.94);
@@ -695,29 +681,33 @@ class AgentBoardWidget {
     if (r === null) return
     const dx = e.clientX - r.startX
     const dy = e.clientY - r.startY
-    let w = r.startW
-    let h = r.startH
-    let top = r.startTop
-    let right = r.startRight
-    if (r.corner.includes('e')) w = r.startW + dx
-    if (r.corner.includes('s')) h = r.startH + dy
-    if (r.corner.includes('w')) { w = r.startW - dx; right = r.startRight - dx }
-    if (r.corner.includes('n')) { h = r.startH - dy; top = r.startTop + dy }
-    // 约束：最小尺寸 + 视口内（左/上锚点角拖宽/拖高时，对侧边缘不得出屏）
     const MIN_W = 220
     const MIN_H = 120
-    const maxW = Math.max(MIN_W, window.innerWidth - 16)
-    const maxH = Math.max(MIN_H, window.innerHeight - 16)
-    w = Math.min(maxW, Math.max(MIN_W, w))
-    h = Math.min(maxH, Math.max(MIN_H, h))
-    // 左/上锚点角：同步 right/top 让对侧锚点不动；右缘/下缘不小于 8px
-    if (r.corner.includes('w')) {
-      right = Math.max(8, r.startRight - (w - r.startW))
-      w = r.startW + (r.startRight - right)
+    // 锚定对侧边：left 固定 = 视口宽 - 起始右距 - 起始宽；bottom 固定 = 起始上距 + 起始高。
+    // 被拖的边跟随指针，宽度/高度由「固定边 ↔ 跟随边」的距离决定。
+    const leftFixed = window.innerWidth - r.startRight - r.startW
+    const bottomFixed = r.startTop + r.startH
+    let w: number
+    let h: number
+    let top: number
+    let right: number
+    if (r.corner.includes('e')) {
+      // 右缘跟随（左缘锚定）：右距 ≥ 8，宽度 = 视口宽 - 右距 - 左缘
+      right = Math.max(8, r.startRight - dx)
+      w = window.innerWidth - right - leftFixed
+    } else {
+      // 左缘跟随（右缘锚定）：右缘不动，左缘不出屏（≥8）
+      w = Math.min(window.innerWidth - r.startRight - 8, Math.max(MIN_W, r.startW - dx))
+      right = r.startRight
     }
-    if (r.corner.includes('n')) {
-      top = Math.min(window.innerHeight - MIN_H - 8, r.startTop + (h - r.startH))
-      h = r.startH + (r.startTop - top)
+    if (r.corner.includes('s')) {
+      // 下缘跟随（上缘锚定）
+      h = Math.min(window.innerHeight - r.startTop - 8, Math.max(MIN_H, r.startH + dy))
+      top = r.startTop
+    } else {
+      // 上缘跟随（下缘锚定）：top ≥ 0，高度 = 下缘 - 上距
+      top = Math.min(bottomFixed - MIN_H, Math.max(0, r.startTop + dy))
+      h = bottomFixed - top
     }
     this.root.style.width = `${Math.round(w)}px`
     this.root.style.height = `${Math.round(h)}px`
