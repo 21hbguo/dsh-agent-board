@@ -34,6 +34,42 @@ const POLL_MS = 2000
 /** localStorage key for the widget position + visibility. */
 const LS_KEY = 'dsh.agentBoard.v1'
 
+/** localStorage key for viewed (已读) finished session ids.
+ *  「done 完点击后的空闲」：双击打开过会话的完成节点标记为已读，
+ *   颜色从蓝（完成）变为灰（空闲），与「已读=弱化」的平台惯例一致。 */
+const VIEWED_KEY = 'dsh.agentBoard.viewed.v1'
+const VIEWED_CAP = 500
+
+const viewedList: string[] = []
+const viewedSet = new Set<string>()
+
+function loadViewed(): void {
+  try {
+    const raw = localStorage.getItem(VIEWED_KEY)
+    if (raw !== null) {
+      const arr = JSON.parse(raw) as unknown
+      if (Array.isArray(arr)) {
+        for (const x of arr) {
+          if (typeof x === 'string') {
+            viewedSet.add(x)
+            viewedList.push(x)
+          }
+        }
+      }
+    }
+  } catch { /* corrupted state falls back to empty */ }
+}
+
+function markViewed(id: string): void {
+  if (viewedSet.has(id)) return
+  viewedSet.add(id)
+  viewedList.push(id)
+  if (viewedList.length > VIEWED_CAP) viewedList.splice(0, viewedList.length - VIEWED_CAP)
+  try { localStorage.setItem(VIEWED_KEY, JSON.stringify(viewedList)) } catch { /* storage full: best-effort */ }
+}
+
+function isViewed(id: string): boolean { return viewedSet.has(id) }
+
 /** Toggle event fired by the sidebar footer action. */
 const TOGGLE_EVENT = 'dsh.agentBoard.toggle'
 
@@ -258,7 +294,7 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
       ? { text: `⚙ ${row.action.text}`, stalled: false }
       : { text: '✍ 输出中…', stalled: false }
   }
-  if (row.status === 'finished') return { text: '完成', stalled: false }
+  if (row.status === 'finished') return { text: isViewed(row.id) ? '空闲' : '完成', stalled: false }
   if (row.status === 'running') {
     if (row.silentMs > threshold) return { text: `停滞 ${formatDuration(row.silentMs)}`, stalled: true }
     // 无动作且未停滞：同行已有答复节选表达进展，不再显示占位文本。
@@ -300,7 +336,7 @@ function renderNode(
   })
   const { text, stalled } = statusText(row, threshold)
   const stClass = stalled ? 'swd-st-stall'
-    : row.status === 'finished' ? 'swd-st-finished'
+    : row.status === 'finished' ? (isViewed(row.id) ? 'swd-st-idle' : 'swd-st-finished')
     : row.status === 'running' ? 'swd-st-running'
     : 'swd-st-idle'
   const dot = document.createElement('span')
@@ -766,8 +802,9 @@ class AgentBoardWidget {
     if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
   }
 
-  /** 点击节点跳转会话。 */
+  /** 点击节点跳转会话。双击打开 = 已查看：完成节点标记已读（蓝→灰/空闲）。 */
   private openSession(id: string, parentId?: string): void {
+    markViewed(id)
     void openSession(this.ctx, id, parentId)
   }
 }
@@ -810,6 +847,7 @@ function AgentBoardAction(props: { wide: boolean }) {
 export const inject = ['slots', 'sessions'] as const
 
 export function apply(ctx: ClientContext): void {
+  loadViewed()
   ctx.effect(() => ctx.slots.register({
     name: 'sidebar.footer.action',
     id: 'dsh-agent-board',
