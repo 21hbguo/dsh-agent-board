@@ -12,6 +12,8 @@
 
 ---
 
+![Agent 看板悬浮窗：绿=working / 蓝=完成 / 灰=已读空闲 / 红=停滞](docs/screenshots/agent-board-widget.png)
+
 ## ✨ 特性
 
 | | 特性 | 说明 |
