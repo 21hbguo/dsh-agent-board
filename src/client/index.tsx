@@ -132,7 +132,12 @@ const WIDGET_CSS = `
   text-align: center;
 }
 .swd-font-btn:hover { color: #fff; }
-.swd-body { overflow-y: auto; padding: 6px 8px; }
+.swd-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
 .swd-tree { margin: 0; padding: 0; list-style: none; }
 /* 子代理层级：每层 28px 缩进 + 树线（根行有 ▸ 占位约 15px，加大缩进保证层级错开明显） */
 .swd-tree ul { margin: 0; padding: 0 0 0 28px; list-style: none; border-left: 1px dashed rgba(154, 208, 255, 0.35); }
@@ -305,7 +310,7 @@ const WIDGET_CSS = `
   padding: 0 4px;
 }
 .swd-dock-mode:hover, .swd-dock-close:hover { color: var(--dsw-alias-label-primary, #fff); }
-.swd-dock-body { flex: 1; overflow-y: auto; padding: 6px 8px; }
+.swd-dock-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px; }
 .swd-dock-handle {
   position: absolute;
   top: 0;
