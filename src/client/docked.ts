@@ -25,6 +25,8 @@ export interface DockedBoardActions {
   openModeMenu: (anchor: HTMLElement, onClose: () => void) => void
   /** 隐藏整个看板（× 按钮）。 */
   onHide: () => void
+  /** 字号调节（±1px，与悬浮窗共用同一档位）。 */
+  onFontChange: (delta: number) => void
   /** 折叠状态变化（标题点击切换）。 */
   onCollapsedChange: (collapsed: boolean) => void
   /** 宽度实时变化（拖拽中，不落盘）。 */
@@ -420,6 +422,22 @@ export class DockedAgentBoard {
     })
     header.appendChild(titleEl)
     this.titleEl = titleEl
+
+    const fontMinusBtn = document.createElement('button')
+    fontMinusBtn.type = 'button'
+    fontMinusBtn.className = 'swd-dock-font'
+    fontMinusBtn.textContent = '−'
+    fontMinusBtn.title = '减小字号'
+    fontMinusBtn.addEventListener('click', () => this.actions.onFontChange(-1))
+    header.appendChild(fontMinusBtn)
+
+    const fontPlusBtn = document.createElement('button')
+    fontPlusBtn.type = 'button'
+    fontPlusBtn.className = 'swd-dock-font'
+    fontPlusBtn.textContent = '+'
+    fontPlusBtn.title = '增大字号'
+    fontPlusBtn.addEventListener('click', () => this.actions.onFontChange(1))
+    header.appendChild(fontPlusBtn)
 
     const modeBtn = document.createElement('button')
     modeBtn.type = 'button'

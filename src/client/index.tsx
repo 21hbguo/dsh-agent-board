@@ -300,7 +300,7 @@ const WIDGET_CSS = `
 }
 .swd-dock-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .swd-dock-title:hover { opacity: 0.85; }
-.swd-dock-mode, .swd-dock-close {
+.swd-dock-mode, .swd-dock-close, .swd-dock-font {
   cursor: pointer;
   color: var(--dsw-alias-label-secondary, #9aa0a6);
   border: none;
@@ -309,7 +309,8 @@ const WIDGET_CSS = `
   line-height: 1;
   padding: 0 4px;
 }
-.swd-dock-mode:hover, .swd-dock-close:hover { color: var(--dsw-alias-label-primary, #fff); }
+.swd-dock-mode:hover, .swd-dock-close:hover, .swd-dock-font:hover { color: var(--dsw-alias-label-primary, #fff); }
+.swd-dock-font { width: 18px; text-align: center; }
 .swd-dock-body { flex: 1; min-height: 0; overflow-y: auto; padding: 6px 8px; }
 .swd-dock-handle {
   position: absolute;
@@ -416,8 +417,8 @@ const WIDGET_CSS = `
     border-bottom: 1px solid var(--dsw-alias-border-l1, rgba(0, 0, 0, 0.08));
     color: var(--dsw-alias-brand-primary, #2563eb);
   }
-  .swd-dock-mode, .swd-dock-close { color: var(--dsw-alias-label-secondary, #6b7280); }
-  .swd-dock-mode:hover, .swd-dock-close:hover { color: var(--dsw-alias-label-primary, #111827); }
+  .swd-dock-mode, .swd-dock-close, .swd-dock-font { color: var(--dsw-alias-label-secondary, #6b7280); }
+  .swd-dock-mode:hover, .swd-dock-close:hover, .swd-dock-font:hover { color: var(--dsw-alias-label-primary, #111827); }
   .swd-dock-handle::after { background: var(--dsw-alias-border-l2, rgba(37, 99, 235, 0.3)); }
   .swd-dock-handle:hover::after { background: var(--dsw-alias-brand-primary, rgba(37, 99, 235, 0.6)); }
   .swd-dock-expand {
@@ -879,6 +880,7 @@ class AgentBoardApp {
     const dockedActions: DockedBoardActions = {
       onOpen: (id, parentId) => this.openSession(id, parentId),
       openModeMenu,
+      onFontChange: (delta) => this.adjustFontSize(delta),
       onHide: () => {
         // × 只关闭停靠面板：并存时切到悬浮窗形态；单形态时才整体隐藏。
         if (this.state.mode === 'both') {
