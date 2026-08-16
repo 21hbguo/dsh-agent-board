@@ -11,6 +11,7 @@ const CLIENT_EXTERNALS = [
   '@deepseek-ai/dsh-client-runtime/client',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-sidebar/client',
+  '@deepseek-ai/dsh-client-ui-settings/client',
 ]
 
 const clientBundle: UserConfig = {

@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-agent-board",
-  "version": "0.1.0",
-  "description": "子代理停滞检测器：后台 subagent 静默超过阈值时，自动往父会话注入 notice 提醒（催/中断/继续等），侧边栏面板实时展示各子代理状态",
+  "version": "0.2.0",
+  "description": "Agent 实时看板：子代理停滞检测器（自动 notice 提醒）+ 树形看板（悬浮窗/停靠右侧面板双形态，可切换/并存/设置开关）",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",

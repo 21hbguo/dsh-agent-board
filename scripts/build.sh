@@ -52,6 +52,7 @@ link_pkg @deepseek-ai/dsh-host-webserver packages/host/webserver
 link_pkg @deepseek-ai/dsh-client-runtime packages/client/runtime
 link_pkg @deepseek-ai/dsh-client-ui-slots packages/client/ui-slots
 link_pkg @deepseek-ai/dsh-client-ui-sidebar packages/client/ui-sidebar
+link_pkg @deepseek-ai/dsh-client-ui-settings packages/client/ui-settings
 # @types/node（编译类型；checkout 自带）
 link_pkg @types/node node_modules/@types/node
 
