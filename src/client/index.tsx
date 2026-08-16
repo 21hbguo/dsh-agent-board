@@ -150,6 +150,32 @@ const WIDGET_CSS = `
 .swd-opening { background: rgba(154, 208, 255, 0.22); }
 /* 跳转彻底失败：红色提示（会话可能已不存在） */
 .swd-open-failed { background: rgba(248, 113, 113, 0.28); }
+/* 四角 resize 手柄：拖拽调整悬浮窗大小 */
+.swd-resize {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  z-index: 3;
+  touch-action: none;
+}
+.swd-resize-nw { top: 0; left: 0; cursor: nwse-resize; }
+.swd-resize-ne { top: 0; right: 0; cursor: nesw-resize; }
+.swd-resize-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+.swd-resize-se { bottom: 0; right: 0; cursor: nwse-resize; }
+.swd-resize::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: rgba(154, 208, 255, 0.45);
+  transition: background 0.15s, transform 0.15s;
+}
+.swd-resize-nw::after { top: 2px; left: 2px; }
+.swd-resize-ne::after { top: 2px; right: 2px; }
+.swd-resize-sw::after { bottom: 2px; left: 2px; }
+.swd-resize-se::after { bottom: 2px; right: 2px; }
+.swd-widget:hover .swd-resize::after { background: rgba(154, 208, 255, 0.85); transform: scale(1.15); }
 .swd-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; transform: translateY(-0.5px); }
 /* 状态色（实心 = 主 agent，空心 = 子代理） */
 .swd-st-running { background: #4ade80; border-color: #4ade80; }
@@ -365,6 +391,8 @@ const WIDGET_CSS = `
   .swd-offline { color: #b45309; }
   .swd-empty { color: #6b7280; }
   .swd-excerpt-inline { color: #6b7280; }
+  .swd-resize::after { background: rgba(37, 99, 235, 0.4); }
+  .swd-widget:hover .swd-resize::after { background: rgba(37, 99, 235, 0.85); }
   .swd-summon {
     color: #2563eb;
     background: rgba(255, 255, 255, 0.94);
@@ -504,6 +532,16 @@ class AgentBoardWidget {
   private dragStartY = 0
   private dragStartTop = 0
   private dragStartRight = 0
+  /** 四角拖拽调大小状态（null = 未在拖）。 */
+  private resize: {
+    corner: 'nw' | 'ne' | 'sw' | 'se'
+    startX: number
+    startY: number
+    startW: number
+    startH: number
+    startTop: number
+    startRight: number
+  } | null = null
   /** 最近一次快照（折叠根/current 变化时即时重渲染用）。 */
   private lastSnapshot: AgentBoardSnapshot | null = null
   /** 用户手动折叠的根（idle 根默认折叠，除非在 expandedRoots）。 */
@@ -517,8 +555,12 @@ class AgentBoardWidget {
     this.actions = actions
     this.root = document.createElement('div')
     this.root.className = 'swd-widget'
+    // 修正历史坏值：位置不得出屏（早期版本拖拽可能落盘 right<0）
+    if (this.state.right < 8) this.state.right = 8
+    if (this.state.top < 0) this.state.top = 0
     this.root.style.top = `${this.state.top}px`
     this.root.style.right = `${this.state.right}px`
+    this.applySize()
     this.applyFontSize(this.state.fontSize)
 
     this.titleTextEl = document.createElement('span')
@@ -596,6 +638,100 @@ class AgentBoardWidget {
 
     this.root.appendChild(this.titleBarEl)
     this.root.appendChild(this.bodyEl)
+    this.mountResizeHandles()
+  }
+
+  /** 四角 resize 手柄（拖拽调悬浮窗宽高，宽高持久化）。 */
+  private mountResizeHandles(): void {
+    const corners: Array<'nw' | 'ne' | 'sw' | 'se'> = ['nw', 'ne', 'sw', 'se']
+    for (const corner of corners) {
+      const handle = document.createElement('div')
+      handle.className = `swd-resize swd-resize-${corner}`
+      handle.title = '拖拽调整大小'
+      handle.addEventListener('pointerdown', (e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        this.beginResize(e, corner)
+      })
+      this.root.appendChild(handle)
+    }
+  }
+
+  /** 应用持久化宽高（0 = 默认/自适应）。 */
+  private applySize(): void {
+    if (this.state.floatingWidth > 0) {
+      this.root.style.width = `${this.state.floatingWidth}px`
+    }
+    if (this.state.floatingHeight > 0) {
+      this.root.style.height = `${this.state.floatingHeight}px`
+      this.root.style.maxHeight = 'none'
+    }
+  }
+
+  private beginResize(e: PointerEvent, corner: 'nw' | 'ne' | 'sw' | 'se'): void {
+    this.resize = {
+      corner,
+      startX: e.clientX,
+      startY: e.clientY,
+      startW: this.root.offsetWidth,
+      startH: this.root.offsetHeight,
+      startTop: this.state.top,
+      startRight: this.state.right,
+    }
+    try {
+      (e.currentTarget as Element).setPointerCapture(e.pointerId)
+    } catch { /* capture is best-effort */ }
+    window.addEventListener('pointermove', this.onResizeMove)
+    window.addEventListener('pointerup', this.onResizeEnd, { once: true })
+    window.addEventListener('pointercancel', this.onResizeEnd, { once: true })
+  }
+
+  private readonly onResizeMove = (e: PointerEvent): void => {
+    const r = this.resize
+    if (r === null) return
+    const dx = e.clientX - r.startX
+    const dy = e.clientY - r.startY
+    let w = r.startW
+    let h = r.startH
+    let top = r.startTop
+    let right = r.startRight
+    if (r.corner.includes('e')) w = r.startW + dx
+    if (r.corner.includes('s')) h = r.startH + dy
+    if (r.corner.includes('w')) { w = r.startW - dx; right = r.startRight - dx }
+    if (r.corner.includes('n')) { h = r.startH - dy; top = r.startTop + dy }
+    // 约束：最小尺寸 + 视口内（左/上锚点角拖宽/拖高时，对侧边缘不得出屏）
+    const MIN_W = 220
+    const MIN_H = 120
+    const maxW = Math.max(MIN_W, window.innerWidth - 16)
+    const maxH = Math.max(MIN_H, window.innerHeight - 16)
+    w = Math.min(maxW, Math.max(MIN_W, w))
+    h = Math.min(maxH, Math.max(MIN_H, h))
+    // 左/上锚点角：同步 right/top 让对侧锚点不动；右缘/下缘不小于 8px
+    if (r.corner.includes('w')) {
+      right = Math.max(8, r.startRight - (w - r.startW))
+      w = r.startW + (r.startRight - right)
+    }
+    if (r.corner.includes('n')) {
+      top = Math.min(window.innerHeight - MIN_H - 8, r.startTop + (h - r.startH))
+      h = r.startH + (r.startTop - top)
+    }
+    this.root.style.width = `${Math.round(w)}px`
+    this.root.style.height = `${Math.round(h)}px`
+    this.root.style.maxHeight = 'none'
+    this.root.style.top = `${Math.round(top)}px`
+    this.root.style.right = `${Math.round(right)}px`
+    this.state.top = Math.round(top)
+    this.state.right = Math.round(right)
+  }
+
+  private readonly onResizeEnd = (): void => {
+    if (this.resize === null) return
+    this.resize = null
+    window.removeEventListener('pointermove', this.onResizeMove)
+    // 落盘宽高与位置
+    this.state.floatingWidth = Math.round(this.root.offsetWidth)
+    this.state.floatingHeight = Math.round(this.root.offsetHeight)
+    saveState(this.state)
   }
 
   /** 构建完成（显隐由 App.sync() 按 mode 编排，这里不自行挂载）。 */

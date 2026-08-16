@@ -31,6 +31,10 @@ export interface BoardState {
   dockedCollapsed: boolean
   /** 看板字号（px，标题栏 −/+ 按钮调节，悬浮窗与停靠面板共用）。 */
   fontSize: number
+  /** 悬浮窗宽度（px，四角拖拽调节；0 = 默认 300）。 */
+  floatingWidth: number
+  /** 悬浮窗高度（px，四角拖拽调节；0 = 内容自适应 + max-height）。 */
+  floatingHeight: number
 }
 
 /** localStorage key for the board state. */
@@ -57,6 +61,8 @@ export const DEFAULT_STATE: BoardState = {
   dockedWidth: DOCKED_DEFAULT_WIDTH,
   dockedCollapsed: false,
   fontSize: 11,
+  floatingWidth: 0,
+  floatingHeight: 0,
 }
 
 export function loadState(): BoardState {
@@ -81,6 +87,8 @@ export function loadState(): BoardState {
           : (parsed as Partial<{ floatingSize?: string }>).floatingSize === 'large' ? 13
           : (parsed as Partial<{ floatingSize?: string }>).floatingSize === 'small' ? 10
           : 11,
+        floatingWidth: typeof parsed.floatingWidth === 'number' ? Math.max(0, parsed.floatingWidth) : 0,
+        floatingHeight: typeof parsed.floatingHeight === 'number' ? Math.max(0, parsed.floatingHeight) : 0,
       }
     }
   } catch { /* corrupted state falls back to defaults */ }
