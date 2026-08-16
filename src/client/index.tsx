@@ -619,7 +619,7 @@ class AgentBoardWidget {
     const closeBtn = document.createElement('span')
     closeBtn.className = 'swd-close'
     closeBtn.textContent = '×'
-    closeBtn.title = '隐藏看板'
+    closeBtn.title = '关闭悬浮窗（并存时保留停靠面板）'
     closeBtn.addEventListener('click', (e) => {
       e.stopPropagation()
       this.actions.onHide()
@@ -790,7 +790,16 @@ class AgentBoardApp {
       onOpen: (id, parentId) => this.openSession(id, parentId),
       openModeMenu,
       openSizeMenu,
-      onHide: () => this.applyVisibility(false),
+      onHide: () => {
+        // × 只关闭悬浮窗：并存时切到停靠形态；单形态时才整体隐藏。
+        if (this.state.mode === 'both') {
+          this.state.mode = 'docked'
+          saveState(this.state)
+          this.sync()
+        } else {
+          this.applyVisibility(false)
+        }
+      },
       onCollapsedChange: (collapsed) => {
         this.state.collapsed = collapsed
         saveState(this.state)
@@ -800,7 +809,16 @@ class AgentBoardApp {
     const dockedActions: DockedBoardActions = {
       onOpen: (id, parentId) => this.openSession(id, parentId),
       openModeMenu,
-      onHide: () => this.applyVisibility(false),
+      onHide: () => {
+        // × 只关闭停靠面板：并存时切到悬浮窗形态；单形态时才整体隐藏。
+        if (this.state.mode === 'both') {
+          this.state.mode = 'floating'
+          saveState(this.state)
+          this.sync()
+        } else {
+          this.applyVisibility(false)
+        }
+      },
       onCollapsedChange: (collapsed) => {
         this.state.dockedCollapsed = collapsed
         saveState(this.state)

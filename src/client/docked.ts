@@ -433,7 +433,7 @@ export class DockedAgentBoard {
     closeBtn.type = 'button'
     closeBtn.className = 'swd-dock-close'
     closeBtn.textContent = '×'
-    closeBtn.title = '隐藏看板'
+    closeBtn.title = '关闭停靠面板（并存时保留悬浮窗）'
     closeBtn.addEventListener('click', () => this.actions.onHide())
     header.appendChild(closeBtn)
 
