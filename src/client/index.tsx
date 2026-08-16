@@ -817,9 +817,11 @@ class AgentBoardWidget {
     // 根筛选：当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
     // 其余历史会话不显示（避免整屏都是 idle 树）。
     const keptRoots = snapshot.roots.filter(root => (
-      root.id === currentId
-      || now - root.lastActivity < ROOT_ACTIVE_WINDOW_MS
-      || keptRows.some(row => row.parentSession === root.id)
+      // 无对话的空白会话不显示（含当前会话；`hasMessages` 缺省时视为显示，兼容旧 host）
+      root.hasMessages !== false
+      && (root.id === currentId
+        || now - root.lastActivity < ROOT_ACTIVE_WINDOW_MS
+        || keptRows.some(row => row.parentSession === root.id))
     ))
     const forest = buildForest(keptRoots, keptRows)
     // 完成项防堆积：每个节点下最多保留 MAX_FINISHED_PER_ROOT 条 finished。

@@ -81,6 +81,9 @@ export interface AgentSnapshotRow {
   readonly label?: string
   /** 会话显示标题（`session/title` 事件最新值；无则缺省，浏览器兜底 id）。 */
   readonly title?: string
+  /** 会话里是否有对话消息（user/assistant message 事件）。无对话的空白会话
+   *  看板不显示；子代理与存档行恒有对话，此字段缺省。 */
+  readonly hasMessages?: boolean
 }
 
 /** 一次快照的完整载荷。 */
@@ -500,7 +503,11 @@ export function apply(ctx: Context, config: Config): void {
         if (label === undefined) ensureLabel(agent.id, header.parentSession)
         rows.push(row)
       } else {
-        roots.push(row)
+        // 顶层会话记录「是否有对话消息」——空白会话（从未收发消息）看板不显示。
+        roots.push({
+          ...row,
+          hasMessages: events.some(e => e.type === 'user/message' || e.type === 'assistant/message'),
+        })
       }
     }
     // 完成态存档：settle 过的子代理保留在板上（浏览器决定何时因「已点开」转空闲并消失）。
