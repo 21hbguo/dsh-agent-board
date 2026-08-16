@@ -182,6 +182,7 @@ const WIDGET_CSS = `
 .swd-st-idle { background: #6b7280; border-color: #6b7280; }
 .swd-st-stall { background: #f87171; border-color: #f87171; }
 .swd-st-finished { background: #60a5fa; border-color: #60a5fa; }
+.swd-st-waiting { background: #fbbf24; border-color: #fbbf24; }
 /* 主 agent：实心圆（状态色填充） */
 .swd-dot-root { border: 1.5px solid; box-shadow: 0 0 5px rgba(255, 255, 255, 0.25); }
 /* 子代理：半透明填充 + 2px 实色描边（颜色面积大、深浅底色都一眼可见） */
@@ -190,6 +191,7 @@ const WIDGET_CSS = `
 .swd-st-finished.swd-dot-ring { background: rgba(96, 165, 250, 0.45); box-shadow: 0 0 7px rgba(96, 165, 250, 0.7); }
 .swd-st-idle.swd-dot-ring { background: rgba(107, 114, 128, 0.45); box-shadow: 0 0 5px rgba(107, 114, 128, 0.45); }
 .swd-st-stall.swd-dot-ring { background: rgba(248, 113, 113, 0.5); box-shadow: 0 0 7px rgba(248, 113, 113, 0.8); }
+.swd-st-waiting.swd-dot-ring { background: rgba(251, 191, 36, 0.45); box-shadow: 0 0 7px rgba(251, 191, 36, 0.75); }
 .swd-toggle { cursor: pointer; color: #9aa0a6; font-size: calc(var(--ab-font, 11px) - 2px); flex: none; width: 10px; text-align: center; }
 .swd-toggle:hover { color: #fff; }
 /* 完成态行：整体弱化，突出「已完成」而不抢 running 的注意力 */
@@ -377,10 +379,12 @@ const WIDGET_CSS = `
   .swd-st-idle { background: #6b7280; border-color: #6b7280; }
   .swd-st-stall { background: #dc2626; border-color: #dc2626; }
   .swd-st-finished { background: #2563eb; border-color: #2563eb; }
+  .swd-st-waiting { background: #d97706; border-color: #d97706; }
   .swd-st-running.swd-dot-ring { background: rgba(22, 163, 74, 0.3); box-shadow: 0 0 6px rgba(22, 163, 74, 0.45); }
   .swd-st-finished.swd-dot-ring { background: rgba(37, 99, 235, 0.32); box-shadow: 0 0 7px rgba(37, 99, 235, 0.5); }
   .swd-st-idle.swd-dot-ring { background: rgba(107, 114, 128, 0.3); box-shadow: 0 0 5px rgba(107, 114, 128, 0.3); }
   .swd-st-stall.swd-dot-ring { background: rgba(220, 38, 38, 0.35); box-shadow: 0 0 7px rgba(220, 38, 38, 0.55); }
+  .swd-st-waiting.swd-dot-ring { background: rgba(217, 119, 6, 0.32); box-shadow: 0 0 7px rgba(217, 119, 6, 0.55); }
   .swd-toggle { color: #6b7280; }
   .swd-toggle:hover { color: #111827; }
   .swd-tag { color: #fff; background: #2563eb; }

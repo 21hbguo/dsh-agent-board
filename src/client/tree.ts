@@ -99,6 +99,10 @@ export function countRunning(forest: TreeNode[]): number {
 
 /** 节点状态文本（动作优先：工具执行 / 流式输出 > 停滞 > 完成 > 处理中 > 空闲）。 */
 export function statusText(row: AgentSnapshotRow, threshold: number): { text: string; stalled: boolean } {
+  // 等待人工介入（ask 挂起 / 审批等待）：黄色圈最醒目，优先于一切状态。
+  if (row.waiting !== undefined) {
+    return { text: '🔔 等你判断', stalled: false }
+  }
   if (row.action !== undefined) {
     return row.action.kind === 'tool'
       ? { text: `⚙ ${row.action.text}`, stalled: false }
@@ -147,7 +151,8 @@ export function renderNode(
     })
   })
   const { text, stalled } = statusText(row, threshold)
-  const stClass = stalled ? 'swd-st-stall'
+  const stClass = row.waiting !== undefined ? 'swd-st-waiting'
+    : stalled ? 'swd-st-stall'
     : row.status === 'finished' ? (isViewed(row.id) ? 'swd-st-idle' : 'swd-st-finished')
     : row.status === 'running' ? 'swd-st-running'
     : 'swd-st-idle'

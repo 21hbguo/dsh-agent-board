@@ -84,6 +84,8 @@ export interface AgentSnapshotRow {
   /** 会话里是否有对话消息（user/assistant message 事件）。无对话的空白会话
    *  看板不显示；子代理与存档行恒有对话，此字段缺省。 */
   readonly hasMessages?: boolean
+  /** 等待人工介入的原因（ask 类工具挂起 / 审批等待）。看板黄色圈提醒。 */
+  readonly waiting?: string
 }
 
 /** 一次快照的完整载荷。 */
@@ -240,6 +242,10 @@ export function apply(ctx: Context, config: Config): void {
   const labelCache = new Map<string, string>()
   /** 正在查询 label 的子代理 id（去重）。 */
   const labelPending = new Set<string>()
+  /** 会话 id → 等待人工的原因（ask 类工具挂起 / 审批等待；黄色圈提醒）。 */
+  const waitingHuman = new Map<string, string>()
+  /** 会话 id → 最近一次 tool/call 的工具名（tool/result 回查用）。 */
+  const lastToolName = new Map<string, string>()
 
   // ---------------------------------------------------------- 存档持久化
   /** 完成态存档落盘路径（~/.dsh/agent-board-archive.json，重启恢复）。 */
@@ -313,6 +319,8 @@ export function apply(ctx: Context, config: Config): void {
     lastRemind.delete(id)
     lastReply.delete(id)
     lastAction.delete(id)
+    waitingHuman.delete(id)
+    lastToolName.delete(id)
     titleCache.delete(id)
     labelCache.delete(id)
     labelPending.delete(id)
@@ -343,10 +351,24 @@ export function apply(ctx: Context, config: Config): void {
           kind: 'tool',
           text: excerpt(`${name}: ${summary}`, ACTION_MAX),
         })
+        lastToolName.set(session.id, name)
+        // ask 类工具挂起 = 等人回答（tool/result 前一直保持）
+        if (/^ask/i.test(name)) waitingHuman.set(session.id, `等待回答（${name}）`)
         break
       }
-      case 'tool/result':
+      case 'tool/result': {
         lastAction.delete(session.id)
+        const name = lastToolName.get(session.id)
+        if (name !== undefined && /^ask/i.test(name)) waitingHuman.delete(session.id)
+        lastToolName.delete(session.id)
+        break
+      }
+      case 'approval/asked':
+        // 权限审批等待人工决定
+        waitingHuman.set(session.id, '等待审批')
+        break
+      case 'approval/decided':
+        waitingHuman.delete(session.id)
         break
       case 'assistant/chunk':
         lastAction.set(session.id, { kind: 'streaming' })
@@ -498,6 +520,7 @@ export function apply(ctx: Context, config: Config): void {
         ...(lastAction.has(agent.id) ? { action: lastAction.get(agent.id) } : {}),
         ...(label !== undefined ? { label } : {}),
         ...(titleCache.has(agent.id) ? { title: titleCache.get(agent.id) } : {}),
+        ...(waitingHuman.has(agent.id) ? { waiting: waitingHuman.get(agent.id)! } : {}),
       }
       if (header.origin === 'subagent') {
         if (label === undefined) ensureLabel(agent.id, header.parentSession)
