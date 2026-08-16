@@ -306,8 +306,7 @@ function statusText(row: AgentSnapshotRow, threshold: number): { text: string; s
 /** 渲染一个树节点（递归）。根节点（顶层会话）蓝色点，当前会话加「当前」标记；
  *  子代理节点显示「子代理<兄弟序号>-<创建名>」。
  *  列结构全行统一（同层严格同列）：[toggle占位10px][圆点][id][节选][状态][当前?]
- *  交互：展开/折叠只走行首 ▸/▾（仅根且有子节点时出现）；单击行本身无操作；
- *  双击任意行 = 打开会话。 */
+ *  交互：单击任意行 = 打开会话；展开/折叠只走行首 ▸/▾（仅根且有子节点时出现）。 */
 function renderNode(
   node: TreeNode,
   threshold: number,
@@ -320,11 +319,11 @@ function renderNode(
   const line = document.createElement('div')
   line.className = 'swd-node'
   if (row.status === 'finished') line.classList.add('swd-finished-line')
-  // 单击行无操作（展开/折叠只走行首 ▸/▾）；双击 = 打开会话。
+  // 单击 = 打开会话；展开/折叠只走行首 ▸/▾。
   line.title = row.lastReply !== undefined
-    ? `行首 ▸/▾ 展开/折叠子树（有子节点时）；双击打开会话 ${row.id}\n最新答复：${row.lastReply}`
-    : `行首 ▸/▾ 展开/折叠子树（有子节点时）；双击打开会话 ${row.id}`
-  line.addEventListener('dblclick', (e) => {
+    ? `点击打开会话 ${row.id}\n行首 ▸/▾ 展开/折叠子树\n最新答复：${row.lastReply}`
+    : `点击打开会话 ${row.id}\n行首 ▸/▾ 展开/折叠子树`
+  line.addEventListener('click', (e) => {
     e.stopPropagation()
     onOpen(row.id, row.parentSession)
   })
