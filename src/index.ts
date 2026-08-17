@@ -255,7 +255,7 @@ export function apply(ctx: Context, config: Config): void {
   /** 会话 id → 最后事件类别：'assistant'（完整回复，可能是完成点）| 'tool' | 'chunk' | 其他。 */
   const lastEventKind = new Map<string, string>()
   /** assistant 完整回复后静默多久视为完成（turn/end 缺失/状态机滞后时的兜底）。 */
-  const ASSISTANT_DONE_SILENT_MS = 60_000
+  const ASSISTANT_DONE_SILENT_MS = 5_000
 
   // ---------------------------------------------------------- 存档持久化
   /** 完成态存档落盘路径（~/.dsh/agent-board-archive.json，重启恢复）。 */
