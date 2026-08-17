@@ -250,6 +250,8 @@ export function apply(ctx: Context, config: Config): void {
   const waitingHuman = new Map<string, string>()
   /** 会话 id → 最近一次 tool/call 的工具名（tool/result 回查用）。 */
   const lastToolName = new Map<string, string>()
+  /** 主 agent 会话 id → 最后完成时刻（turn/end；完成态蓝/灰，点开已读由浏览器处理）。 */
+  const rootFinished = new Map<string, number>()
 
   // ---------------------------------------------------------- 存档持久化
   /** 完成态存档落盘路径（~/.dsh/agent-board-archive.json，重启恢复）。 */
@@ -325,6 +327,7 @@ export function apply(ctx: Context, config: Config): void {
     lastAction.delete(id)
     waitingHuman.delete(id)
     lastToolName.delete(id)
+    rootFinished.delete(id)
     titleCache.delete(id)
     labelCache.delete(id)
     labelPending.delete(id)
@@ -374,6 +377,14 @@ export function apply(ctx: Context, config: Config): void {
       case 'approval/decided':
         waitingHuman.delete(session.id)
         break
+      case 'turn/start':
+        // 主 agent 开始新一轮：清除完成态
+        if (session.header.origin !== 'subagent') rootFinished.delete(session.id)
+        break
+      case 'turn/end':
+        // 主 agent 每轮 turn 结束 = 完成（标蓝；浏览器点开已读转灰）
+        if (session.header.origin !== 'subagent') rootFinished.set(session.id, event.time)
+        break
       case 'assistant/chunk':
         lastAction.set(session.id, { kind: 'streaming' })
         break
@@ -387,6 +398,8 @@ export function apply(ctx: Context, config: Config): void {
   const settledArchive = new Map<string, AgentSnapshotRow & { readonly endedAt: number }>()
   /** 存档保留时长：超过后从快照移除（防内存增长）。 */
   const ARCHIVE_KEEP_MS = 4 * 60 * 60_000
+  /** 主 agent 完成态保留时长（turn 结束后标蓝/灰，60 分钟自动消失——比子代理 5 分钟久）。 */
+  const ROOT_FINISHED_KEEP_MS = 60 * 60_000
 
   /** 子代理 settle 时把最终信息存档（status=finished），不随 agent dispose 丢失。
    *  幂等：已存档则跳过。subagent/end 与 agent/disposed 谁先到谁存档。 */
@@ -552,8 +565,17 @@ export function apply(ctx: Context, config: Config): void {
         rows.push(row)
       } else {
         // 顶层会话记录「是否有对话消息」——空白会话（从未收发消息）看板不显示。
+        // 完成态：idle 且 turn/end 过且在保留期内 → status 标 finished（蓝/灰，浏览器已读逻辑）。
+        const endedAt = rootFinished.get(agent.id)
+        let rootStatus = row.status
+        if (agent.status === 'idle' && endedAt !== undefined && now - endedAt <= ROOT_FINISHED_KEEP_MS) {
+          rootStatus = 'finished'
+        } else if (endedAt !== undefined && now - endedAt > ROOT_FINISHED_KEEP_MS) {
+          rootFinished.delete(agent.id)
+        }
         roots.push({
           ...row,
+          status: rootStatus,
           hasMessages: events.some(e => e.type === 'user/message' || e.type === 'assistant/message'),
         })
       }

@@ -15,8 +15,11 @@ import type { AgentBoardSnapshot, AgentSnapshotRow } from '../index.js'
 export const ROOT_ACTIVE_WINDOW_MS = 10 * 60_000
 
 /** 完成态保留期：子代理完成后继续保留在板上（父根可见期间可查看），
- *  超时自动消失，避免旧完成节点无限堆积。 */
-export const FINISHED_KEEP_MS = 30 * 60_000
+ *  超时自动消失。5 分钟：快速瞄一眼完成结果，不堆积。 */
+export const FINISHED_KEEP_MS = 5 * 60_000
+
+/** 主 agent 完成态保留期（turn 结束后标蓝/灰）：60 分钟，比子代理久——主任务完成更值得关注。 */
+export const ROOT_FINISHED_KEEP_MS = 60 * 60_000
 
 /** 每个根下最多保留的完成态子代理行数（running 不限），防海量堆积。 */
 export const MAX_FINISHED_PER_ROOT = 12
@@ -248,13 +251,21 @@ export function renderBoardTree(opts: {
   // 根筛选：无对话的空白会话不显示（含当前会话；`hasMessages` 缺省视为显示，
   // 兼容旧 host）+ 当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
   // 其余历史会话不显示（避免整屏都是 idle 树）。
+  // 根筛选：无对话的空白会话不显示（含当前会话；`hasMessages` 缺省视为显示，
+  // 兼容旧 host）+ 当前会话 + 最近活跃窗口内（working 及刚结束的）+ 有活跃子代理的；
+  // 完成态根（finished）：独立 60 分钟保留窗口（不按 10 分钟 idle 窗口提前藏掉）。
   const keptRoots = snapshot.roots.filter(root => (
     root.hasMessages !== false
     && (root.id === currentId
+      || (root.status === 'finished' && now - root.lastActivity <= ROOT_FINISHED_KEEP_MS)
       || now - root.lastActivity < ROOT_ACTIVE_WINDOW_MS
       || keptRows.some(row => row.parentSession === root.id))
   ))
-  const forest = buildForest(keptRoots, keptRows)
+  // 当前会话的完成态视为已读（用户正在看，不标蓝）——展开副本避免改共享快照。
+  const rootsForRender = keptRoots.map(root =>
+    root.id === currentId && root.status === 'finished' ? { ...root, status: 'idle' as const } : root
+  )
+  const forest = buildForest(rootsForRender, keptRows)
   // 完成项防堆积：每个节点下最多保留 MAX_FINISHED_PER_ROOT 条 finished。
   const trimFinished = (node: TreeNode): void => {
     let kept = 0
