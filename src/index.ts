@@ -382,7 +382,10 @@ export function apply(ctx: Context, config: Config): void {
         if (session.header.origin !== 'subagent') rootFinished.delete(session.id)
         break
       case 'turn/end':
-        // 主 agent 每轮 turn 结束 = 完成（标蓝；浏览器点开已读转灰）
+        // 主 agent 每轮 turn 结束 = 完成（标蓝；浏览器点开已读转灰）。
+        // 同时清当前动作——turn 结束后不再显示「⚙ 工具执行中」，
+        // 避免 agent.status 滞后/工具 result 事件缺失导致「完成了还显示 running+bash」。
+        lastAction.delete(session.id)
         if (session.header.origin !== 'subagent') rootFinished.set(session.id, event.time)
         break
       case 'assistant/chunk':
@@ -568,7 +571,9 @@ export function apply(ctx: Context, config: Config): void {
         // 完成态：idle 且 turn/end 过且在保留期内 → status 标 finished（蓝/灰，浏览器已读逻辑）。
         const endedAt = rootFinished.get(agent.id)
         let rootStatus = row.status
-        if (agent.status === 'idle' && endedAt !== undefined && now - endedAt <= ROOT_FINISHED_KEEP_MS) {
+        if (endedAt !== undefined && now - endedAt <= ROOT_FINISHED_KEEP_MS) {
+          // turn/end 已发生（事件流为准）→ 完成态；不依赖 agent.status——
+          // 状态机滞后时也显示「完成」而非错误的「运行中」。
           rootStatus = 'finished'
         } else if (endedAt !== undefined && now - endedAt > ROOT_FINISHED_KEEP_MS) {
           rootFinished.delete(agent.id)
