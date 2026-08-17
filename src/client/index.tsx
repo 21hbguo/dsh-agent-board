@@ -1077,7 +1077,8 @@ class AgentBoardApp {
   }
 
   /** 归档会话（行尾 🗑 按钮）：host workspace.archiveSession，归档后连同其子代理
-   *  树从看板过滤（host 快照级联）；轮询/SSE 自动刷新消失。 */
+   *  树从看板过滤（host 快照级联）。成功后强制刷新（绕过 poll 的 fetching 守卫，
+   *  否则恰逢轮询请求在飞时会拖到下一个 2s 周期才消失）。 */
   private archiveSession(id: string): void {
     void fetch('/api/workspace.archiveSession', {
       method: 'POST',
@@ -1092,9 +1093,19 @@ class AgentBoardApp {
       if (!res.ok) throw new Error(String(res.status))
       return res.json()
     }).then(() => {
-      // 立即拉一次快照让该行马上消失（不等到下个轮询周期）。
-      this.poll()
+      this.refreshNow()
     }).catch(() => { /* 归档失败静默（行保留，下次可重试） */ })
+  }
+
+  /** 立即拉一次快照并渲染（绕过 poll 的 fetching/hidden 守卫，操作后即时反馈）。 */
+  private refreshNow(): void {
+    void fetch('/api/agent-board/agents')
+      .then(res => { if (!res.ok) throw new Error(String(res.status)); return res.json() as Promise<AgentBoardSnapshot> })
+      .then(snapshot => {
+        this.lastSnapshot = snapshot
+        this.render(snapshot)
+      })
+      .catch(() => { /* 刷新失败交给轮询兜底 */ })
   }
 
   private start(): void {
