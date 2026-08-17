@@ -134,7 +134,7 @@ export function renderNode(
   node: TreeNode,
   threshold: number,
   onOpen: (id: string, parentId?: string) => Promise<boolean>,
-  opts: { isRoot?: boolean; isCurrent?: boolean; currentId?: string; idx?: number; collapsed?: boolean; onToggle?: () => void } = {},
+  opts: { isRoot?: boolean; isCurrent?: boolean; currentId?: string; idx?: number; collapsed?: boolean; onToggle?: () => void; onArchive?: (id: string) => void } = {},
 ): HTMLLIElement {
   const { row } = node
   const hasChildren = node.children.length > 0
@@ -207,6 +207,18 @@ export function renderNode(
   meta.className = stalled ? 'swd-stall' : 'swd-meta'
   meta.textContent = text
   if (text !== '') line.appendChild(meta)
+  // 归档按钮：hover 行时在行尾出现（不占前列，避免误点），点击归档该会话。
+  if (opts.onArchive !== undefined) {
+    const archiveBtn = document.createElement('span')
+    archiveBtn.className = 'swd-archive-btn'
+    archiveBtn.textContent = '🗑'
+    archiveBtn.title = '归档此会话（连同其子代理从看板隐藏）'
+    archiveBtn.addEventListener('click', (e) => {
+      e.stopPropagation()
+      opts.onArchive?.(row.id)
+    })
+    line.appendChild(archiveBtn)
+  }
   // 「当前」标记：放行尾（不占前列，避免列错位）。
   if (opts.isCurrent === true) {
     const tag = document.createElement('span')
@@ -219,7 +231,11 @@ export function renderNode(
     const ul = document.createElement('ul')
     for (const [i, child] of node.children.entries()) {
       // 子代理行同样参与「当前」标记（点开子代理会话后行尾显示 tag，跳转有反馈）。
-      ul.appendChild(renderNode(child, threshold, onOpen, { idx: i + 1, isCurrent: child.row.id === opts.currentId }))
+      ul.appendChild(renderNode(child, threshold, onOpen, {
+        idx: i + 1,
+        isCurrent: child.row.id === opts.currentId,
+        onArchive: opts.onArchive,
+      }))
     }
     li.appendChild(ul)
   }
@@ -242,6 +258,8 @@ export function renderBoardTree(opts: {
   onOpen: (id: string, parentId?: string) => Promise<boolean>
   /** 用户折叠/展开某根之后回调（surface 借此用最近快照重渲染）。 */
   afterToggle?: () => void
+  /** 归档按钮回调（行尾 hover 出现，点击归档该会话）。 */
+  onArchive?: (id: string) => void
 }): TreeNode[] {
   try {
   const { snapshot, currentId } = opts
@@ -306,6 +324,7 @@ export function renderBoardTree(opts: {
       isCurrent: root.row.id === currentId,
       currentId,
       collapsed,
+      onArchive: opts.onArchive,
       onToggle: () => {
         if (opts.collapsedRoots.has(root.row.id)) {
           opts.collapsedRoots.delete(root.row.id)

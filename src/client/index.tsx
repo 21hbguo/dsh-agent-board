@@ -44,7 +44,7 @@ import {
   type BoardMode,
   type BoardState,
 } from './state.js'
-import { loadViewed, markViewed, openBoardSession, renderBoardTree } from './tree.js'
+import { loadViewed, markViewed, openBoardSession, renderBoardTree, newRpcId } from './tree.js'
 import { registerSubagentTab } from './subagent-tab.js'
 
 /** Poll interval (ms) while the tab is visible. 2s：状态/动作切换的感知延迟
@@ -62,6 +62,8 @@ interface WidgetBoardActions {
   onFontChange: (delta: number) => void
   onHide: () => void
   onCollapsedChange: (collapsed: boolean) => void
+  /** 归档会话（行尾 🗑 按钮）。 */
+  onArchive: (id: string) => void
 }
 
 /** 全部样式（悬浮窗 + 模式菜单 + 停靠面板），一次性注入 <head>。
@@ -190,6 +192,18 @@ const WIDGET_CSS = `
 .swd-toggle:hover { color: #fff; }
 /* 完成态行：整体弱化，突出「已完成」而不抢 running 的注意力 */
 .swd-finished-line { opacity: 0.62; }
+/* 归档按钮：行尾 hover 显示（不占前列避免误点） */
+.swd-archive-btn {
+  display: none;
+  cursor: pointer;
+  color: #9aa0a6;
+  font-size: 10px;
+  flex: none;
+  margin-left: 4px;
+  padding: 0 2px;
+}
+.swd-node:hover .swd-archive-btn { display: inline-block; }
+.swd-archive-btn:hover { color: #fff; }
 .swd-tag {
   color: #0f172a;
   background: #60a5fa;
@@ -387,6 +401,8 @@ const WIDGET_CSS = `
   .swd-id-root { color: #2563eb; }
   .swd-meta { color: #6b7280; }
   .swd-stall { color: #dc2626; }
+  .swd-archive-btn { color: #6b7280; }
+  .swd-archive-btn:hover { color: #111827; }
   .swd-offline { color: #b45309; }
   .swd-empty { color: #6b7280; }
   .swd-excerpt-inline { color: #6b7280; }
@@ -801,6 +817,7 @@ class AgentBoardWidget {
       collapsedRoots: this.collapsedRoots,
       expandedRoots: this.expandedRoots,
       onOpen: (id, parentId) => this.actions.onOpen(id, parentId),
+      onArchive: (id) => this.actions.onArchive(id),
       afterToggle: () => {
         if (this.lastSnapshot !== null) this.render(this.lastSnapshot)
       },
@@ -886,6 +903,7 @@ class AgentBoardApp {
         saveState(this.state)
         this.widget.renderCollapseNow()
       },
+      onArchive: (id) => this.archiveSession(id),
     }
     const dockedActions: DockedBoardActions = {
       onOpen: (id, parentId) => this.openSession(id, parentId),
@@ -906,6 +924,7 @@ class AgentBoardApp {
         saveState(this.state)
         this.docked.syncLayout()
       },
+      onArchive: (id) => this.archiveSession(id),
       onWidthChange: (width) => {
         this.state.dockedWidth = width
       },
@@ -1055,6 +1074,27 @@ class AgentBoardApp {
   private openSession(id: string, parentId?: string): Promise<boolean> {
     markViewed(id)
     return openBoardSession(this.ctx, id, parentId)
+  }
+
+  /** 归档会话（行尾 🗑 按钮）：host workspace.archiveSession，归档后连同其子代理
+   *  树从看板过滤（host 快照级联）；轮询/SSE 自动刷新消失。 */
+  private archiveSession(id: string): void {
+    void fetch('/api/workspace.archiveSession', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: newRpcId(),
+        method: 'workspace.archiveSession',
+        payload: { sessionId: id },
+      }),
+    }).then(res => {
+      if (!res.ok) throw new Error(String(res.status))
+      return res.json()
+    }).then(() => {
+      // 立即拉一次快照让该行马上消失（不等到下个轮询周期）。
+      this.poll()
+    }).catch(() => { /* 归档失败静默（行保留，下次可重试） */ })
   }
 
   private start(): void {

@@ -35,6 +35,8 @@ export interface DockedBoardActions {
   onWidthCommit: () => void
   /** 从折叠态展开。 */
   onExpand: () => void
+  /** 归档会话（行尾 🗑 按钮）。 */
+  onArchive: (id: string) => void
 }
 
 /**
@@ -528,6 +530,7 @@ export class DockedAgentBoard {
       collapsedRoots: this.collapsedRoots,
       expandedRoots: this.expandedRoots,
       onOpen: (id, parentId) => this.actions.onOpen(id, parentId),
+      onArchive: (id) => this.actions.onArchive(id),
     })
   }
 
