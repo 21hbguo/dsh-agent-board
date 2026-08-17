@@ -1173,20 +1173,44 @@ function AgentBoardSettingRow() {
  */
 export const inject = ['slots', 'sessions', 'locale'] as const
 
+/** 槽位注册保护：`ctx.slots.register` 是立即注册，父槽 entry（如 settings.section /
+ *  ui-sidebar）若晚于本插件加载会抛 "slot is not declared"——若不加保护，整个
+ *  client apply 失败导致看板全部功能丢失。失败时延迟重试（父槽稍后就绪），
+ *  上限后放弃（仅该项槽位缺失，不影响看板主体）。 */
+function registerSlotGuarded(ctx: ClientContext, label: string, register: () => void): void {
+  let retries = 0
+  const attempt = (): void => {
+    try {
+      register()
+    } catch (error) {
+      if (retries++ < 15) {
+        window.setTimeout(attempt, 1000)
+      } else {
+        ctx.logger.warn(`[agent-board] ${label} 槽位注册放弃（父槽未就绪）: ${String(error)}`)
+      }
+    }
+  }
+  attempt()
+}
+
 export function apply(ctx: ClientContext): void {
   loadViewed()
-  ctx.effect(() => ctx.slots.register({
-    name: 'sidebar.footer.action',
-    id: 'dsh-agent-board',
-    order: 100,
-    inject: () => ({}),
-  }, AgentBoardAction), 'agent-board: footer action')
-  ctx.effect(() => ctx.slots.register({
-    name: 'settings.general.item',
-    id: 'agent-board',
-    order: 30,
-    inject: () => ({}),
-  }, AgentBoardSettingRow), 'agent-board: settings row')
+  registerSlotGuarded(ctx, 'sidebar.footer.action', () => {
+    ctx.effect(() => ctx.slots.register({
+      name: 'sidebar.footer.action',
+      id: 'dsh-agent-board',
+      order: 100,
+      inject: () => ({}),
+    }, AgentBoardAction), 'agent-board: footer action')
+  })
+  registerSlotGuarded(ctx, 'settings.general.item', () => {
+    ctx.effect(() => ctx.slots.register({
+      name: 'settings.general.item',
+      id: 'agent-board',
+      order: 30,
+      inject: () => ({}),
+    }, AgentBoardSettingRow), 'agent-board: settings row')
+  })
   ctx.effect(() => {
     const app = new AgentBoardApp(ctx)
     app.mount()
