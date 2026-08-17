@@ -464,8 +464,27 @@ export function apply(ctx: Context, config: Config): void {
   // 装配，且 session/title 是历史事件不会重放，必须在此兜底。
   ctx.on('agent/created', ({ agent }) => warmupTitle(agent))
 
-  // 启动预热：为已存在的会话回填标题（插件装配前产生的 session/title 事件）。
-  for (const agent of ctx.agents.list()) warmupTitle(agent)
+  /** 从会话事件流重建主 agent 完成态（turn/end 边界）：host 重启/插件热重载后
+   *  rootFinished 是内存态会丢失——扫事件尾部最后边界，turn/end 则恢复完成态，
+   *  主 agent 蓝点不会因重启凭空消失。 */
+  const warmupRootFinished = (agent: AgentLike): void => {
+    if (agent.session.header.origin === 'subagent') return
+    const events = agent.session.events
+    for (let i = events.length - 1; i >= 0; i--) {
+      const type = events[i].type
+      if (type === 'turn/start' || type === 'turn/end') {
+        if (type === 'turn/end') rootFinished.set(agent.id, events[i].time)
+        break
+      }
+    }
+  }
+  ctx.on('agent/created', ({ agent }) => warmupRootFinished(agent))
+
+  // 启动预热：为已存在的会话回填标题 + 重建完成态（插件装配前产生的事件）。
+  for (const agent of ctx.agents.list()) {
+    warmupTitle(agent)
+    warmupRootFinished(agent)
+  }
 
   /** 向停滞子代理的父会话注入一条 notice（静默排队，不唤醒模型）。 */
   const remind = (agent: AgentLike, silentForMs: number): void => {
