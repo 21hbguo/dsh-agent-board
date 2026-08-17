@@ -252,6 +252,10 @@ export function apply(ctx: Context, config: Config): void {
   const lastToolName = new Map<string, string>()
   /** 主 agent 会话 id → 最后完成时刻（turn/end；完成态蓝/灰，点开已读由浏览器处理）。 */
   const rootFinished = new Map<string, number>()
+  /** 会话 id → 最后事件类别：'assistant'（完整回复，可能是完成点）| 'tool' | 'chunk' | 其他。 */
+  const lastEventKind = new Map<string, string>()
+  /** assistant 完整回复后静默多久视为完成（turn/end 缺失/状态机滞后时的兜底）。 */
+  const ASSISTANT_DONE_SILENT_MS = 60_000
 
   // ---------------------------------------------------------- 存档持久化
   /** 完成态存档落盘路径（~/.dsh/agent-board-archive.json，重启恢复）。 */
@@ -328,6 +332,7 @@ export function apply(ctx: Context, config: Config): void {
     waitingHuman.delete(id)
     lastToolName.delete(id)
     rootFinished.delete(id)
+    lastEventKind.delete(id)
     titleCache.delete(id)
     labelCache.delete(id)
     labelPending.delete(id)
@@ -349,6 +354,9 @@ export function apply(ctx: Context, config: Config): void {
         const text = extractReplyText(event.data?.message?.content)
         if (text.length > 0) lastReply.set(session.id, text)
         lastAction.delete(session.id)
+        // 完整回复 = 潜在完成点；若之前被兜底误标完成，新活动立即纠正
+        rootFinished.delete(session.id)
+        lastEventKind.set(session.id, 'assistant')
         break
       }
       case 'tool/call': {
@@ -359,6 +367,9 @@ export function apply(ctx: Context, config: Config): void {
           text: excerpt(`${name}: ${summary}`, ACTION_MAX),
         })
         lastToolName.set(session.id, name)
+        // 工具活动 = 正在跑，清除兜底完成标记
+        rootFinished.delete(session.id)
+        lastEventKind.set(session.id, 'tool')
         // ask 类工具挂起 = 等人回答（tool/result 前一直保持）
         if (/^ask/i.test(name)) waitingHuman.set(session.id, `等待回答（${name}）`)
         break
@@ -390,6 +401,8 @@ export function apply(ctx: Context, config: Config): void {
         break
       case 'assistant/chunk':
         lastAction.set(session.id, { kind: 'streaming' })
+        rootFinished.delete(session.id)
+        lastEventKind.set(session.id, 'chunk')
         break
       default:
         break
@@ -515,6 +528,16 @@ export function apply(ctx: Context, config: Config): void {
   const scan = (): void => {
     const now = Date.now()
     for (const agent of ctx.agents.list()) {
+      // 兜底完成判定：主 agent 显示 running，但最后事件是完整回复（assistant/message）
+      // 且已静默超过阈值（turn/end 缺失/agent 状态机滞后）→ 视为完成（蓝）。
+      // 新活动（工具/流式）会立即清除该标记（见 session/event 处理）。
+      if (agent.session.header.origin !== 'subagent'
+        && agent.status === 'running'
+        && lastEventKind.get(agent.id) === 'assistant'
+        && now - (lastActivity.get(agent.id) ?? 0) > ASSISTANT_DONE_SILENT_MS
+        && !rootFinished.has(agent.id)) {
+        rootFinished.set(agent.id, lastActivity.get(agent.id) ?? now)
+      }
       if (agent.session.header.origin !== 'subagent') continue
       if (agent.status !== 'running') continue
       const events = agent.session.events
