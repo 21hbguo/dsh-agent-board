@@ -354,8 +354,10 @@ export function apply(ctx: Context, config: Config): void {
         const text = extractReplyText(event.data?.message?.content)
         if (text.length > 0) lastReply.set(session.id, text)
         lastAction.delete(session.id)
-        // 完整回复 = 潜在完成点；若之前被兜底误标完成，新活动立即纠正
-        rootFinished.delete(session.id)
+        // 完整回复 = 潜在完成点。注意：不能在此删除 rootFinished——
+        // 实际事件顺序可能 turn/end 先、最后一条 assistant/message 后（结算晚发），
+        // 删除会让刚设置的完成态丢失（显示空闲而非完成）。
+        // 真正的「新活动纠正」只由 tool/call 与 assistant/chunk 承担。
         lastEventKind.set(session.id, 'assistant')
         break
       }
